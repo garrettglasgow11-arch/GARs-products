@@ -4,6 +4,18 @@
     "texture_data": {
         "garrett:obsidian_sword": {
             "textures": "textures/items/obsidian_sword"
+        },
+        "garrett:burnt_leather": {
+            "textures": "textures/items/burnt_leather"
+        },
+        "garrett:obsidian_sword_hilt": {
+            "textures": "textures/items/obsidian_sword_hilt"
+        },
+        "garrett:obsidian_sword_mount": {
+            "textures": "textures/items/obsidian_sword_mount"
+        },
+        "garrett:obsidian_blade": {
+            "textures": "textures/items/obsidian_blade"
         }
     }
 }
