@@ -16,6 +16,18 @@
         },
         "garrett:obsidian_blade": {
             "textures": "textures/items/obsidian_blade"
+        },
+        "garrett:obsidian_helmet": {
+            "textures": "textures/items/obsidian_helmet"
+        },
+        "garrett:obsidian_chestplate": {
+            "textures": "textures/items/obsidian_chestplate"
+        },
+        "garrett:obsidian_leggings": {
+            "textures": "textures/items/obsidian_leggings"
+        },
+        "garrett:obsidian_boots": {
+            "textures": "textures/items/obsidian_boots"
         }
     }
 }

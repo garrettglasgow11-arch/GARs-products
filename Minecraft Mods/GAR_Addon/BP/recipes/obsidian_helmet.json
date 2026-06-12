@@ -1,0 +1,15 @@
+{
+    "format_version": "1.17.41",
+    "minecraft:recipe_shaped": {
+        "description": { "identifier": "garrett:recipe_obsidian_helmet" },
+        "tags": ["crafting_table"],
+        "pattern": [
+            "OOO",
+            "O O"
+        ],
+        "key": {
+            "O": { "item": "minecraft:obsidian" }
+        },
+        "result": { "item": "garrett:obsidian_helmet" }
+    }
+}
