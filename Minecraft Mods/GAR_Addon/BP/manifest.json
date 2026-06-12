@@ -1,0 +1,34 @@
+{
+    "format_version": 2,
+    "header": {
+        "name": "Garrett's Obsidian Gear [BP]",
+        "description": "Adds the Obsidian Sword and more to come!\nMade by Garrett6826",
+        "uuid": "eb2ed502-812e-4af0-a8b9-7acec85083cd",
+        "version": [1, 2, 0],
+        "min_engine_version": [1, 26, 0]
+    },
+    "modules": [
+        {
+            "type": "data",
+            "uuid": "a174b53c-c8aa-47ea-a265-b17113d5bd48",
+            "version": [1, 0, 0]
+        },
+        {
+            "type": "script",
+            "language": "javascript",
+            "uuid": "24a84a1e-7ee3-4377-acf2-adf01e9d7a0e",
+            "version": [1, 2, 0],
+            "entry": "scripts/main.js"
+        }
+    ],
+    "dependencies": [
+        {
+            "uuid": "25e5dc9c-b080-4bd7-82b9-9b0a3db40003",
+            "version": [1, 0, 0]
+        },
+        {
+            "module_name": "@minecraft/server",
+            "version": "2.7.0"
+        }
+    ]
+}
