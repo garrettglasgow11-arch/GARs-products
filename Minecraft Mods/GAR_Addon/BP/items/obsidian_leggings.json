@@ -10,27 +10,22 @@
         },
         "components": {
             "minecraft:icon": "garrett:obsidian_leggings",
-            "minecraft:display_name": {
-                "value": "item.garrett:obsidian_leggings"
-            },
+            "minecraft:display_name": { "value": "item.garrett:obsidian_leggings" },
             "minecraft:max_stack_size": 1,
             "minecraft:rarity": "epic",
             "minecraft:wearable": {
-                "protection": 7,
+                "protection": 8,
                 "slot": "slot.armor.legs"
             },
             "minecraft:durability": {
-                "damage_chance": { "min": 10, "max": 50 },
-                "max_durability": 1100
+                "damage_chance": { "min": 5, "max": 20 },
+                "max_durability": 8200
             },
             "minecraft:fire_resistant": { "value": true },
-            "minecraft:enchantable": {
-                "slot": "armor_legs",
-                "value": 15
-            },
+            "minecraft:enchantable": { "slot": "armor_legs", "value": 15 },
             "minecraft:repairable": {
                 "repair_items": [
-                    { "items": ["minecraft:obsidian"], "repair_amount": 275 }
+                    { "items": ["minecraft:obsidian"], "repair_amount": 2050 }
                 ]
             }
         }
