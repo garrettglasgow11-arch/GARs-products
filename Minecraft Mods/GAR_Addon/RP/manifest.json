@@ -4,7 +4,7 @@
         "name": "Garrett's Obsidian Gear [RP]",
         "description": "Adds the Obsidian Sword and more to come!\nMade by Garrett6826",
         "uuid": "25e5dc9c-b080-4bd7-82b9-9b0a3db40003",
-        "version": [1, 5, 1],
+        "version": [1, 5, 2],
         "min_engine_version": [1, 26, 0]
     },
     "modules": [
