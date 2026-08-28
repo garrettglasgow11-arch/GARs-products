@@ -1,13 +1,13 @@
 # GAR Products
 
-Free browser games by GAR Productions. Every game is a single self-contained
-HTML file — no build step, no dependencies, no server. Open it and it runs.
+Games by GAR Productions. Browser games are single self-contained HTML files —
+no build step, no dependencies, no server. Desktop games are native Python.
 
 ## Games
 
 | Game | Status | Description |
 |------|--------|-------------|
-| [Pocket Colony](games/pocket-colony/) | Playable | A fan-made ant colony simulator — forage, hatch, build, raid. |
+| [Pocket Colony](games/pocket-colony/) | Desktop | A fan-made ant colony sim. Native pixel-art game — Python + pygame. |
 | [Cosmicon](games/cosmicon/) | Later | *Void Collector* RPG prototype. Parked; the page is a placeholder. |
 
 ## Layout
@@ -15,38 +15,40 @@ HTML file — no build step, no dependencies, no server. Open it and it runs.
 ```
 games/
   index.html            hub page linking every game
-  pocket-colony/
-    index.html          the whole game (markup, CSS, JS, art)
+  pocket-colony/        native desktop game (Python + pygame)
+    main.py             entry point
+    pocketcolony/       renderer, art, state, world, ui, scenes, debug
   cosmicon/
     index.html          "later" placeholder
 ```
 
-## Running locally
+## Running
 
-Open `games/index.html` in a browser, or serve the folder:
+Browser games: open `games/index.html`, or serve the folder with
+`python3 -m http.server 8000`.
+
+Pocket Colony:
 
 ```sh
-python3 -m http.server 8000
-# then visit http://localhost:8000/games/
+cd games/pocket-colony
+pip install -r requirements.txt
+python3 main.py
 ```
-
-Saves live in `localStorage`, per browser. Clearing site data wipes progress.
 
 ## Pocket Colony
 
-A colony sim inspired by mobile ant games, written from scratch — original
-code and canvas-drawn art, no third-party assets or libraries. Not affiliated
-with, endorsed by, or containing content from any commercial game.
+A native pixel-art ant colony sim, written from scratch — original code and
+hand-authored sprite data, bitmap fonts, no third-party assets or engine. Not
+affiliated with, endorsed by, or containing content from any commercial game.
 
-Three loops feed each other:
+You control one ant directly. Forage and fight on the surface, then walk down
+the shaft into the nest and move room to room to manage it — the chambers are
+places you stand in, not menu entries. Workers follow you and haul food home;
+soldiers follow and fight.
 
-- **Field** — workers forage on a live canvas sim. Tap the ground to drop a
-  pheromone trail and pull the swarm to a spot. Soldiers patrol the mound and
-  fight off intruders that wander in.
-- **Nest** — the queen eats leaves and lays eggs. Hatch them into workers or
-  soldiers, and spend sand on chambers that raise your caps and rates.
-- **Raid** — send soldiers at rival camps for loot. Losses are permanent, and
-  a losing party is wiped out.
+Ships with a beta tester menu (`F3`): live diagnostics and a frame-time graph,
+debug toggles including god mode and noclip, cheats, a 15-case self-test suite,
+and an action log.
 
-The economy runs on wall-clock time, so it keeps ticking with the tab in the
-background, and credits progress for time away (capped at 8 hours).
+See [games/pocket-colony/README.md](games/pocket-colony/README.md) for the full
+rundown.
