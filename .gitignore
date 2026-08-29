@@ -3,3 +3,6 @@ Thumbs.db
 *.swp
 __pycache__/
 *.py[cod]
+build/
+dist/
+*.icns

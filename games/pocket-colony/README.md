@@ -7,10 +7,42 @@ entire UI is rendered onto a 224×400 framebuffer scaled up by a whole number.
 
 ## Running it
 
+### Standalone binary — nothing to install
+
+Grab the build for your platform from the repository's Releases, unpack it,
+and run it. Python and pygame are inside the file; there is nothing else to
+set up.
+
+| | |
+|---|---|
+| Windows | `PocketColony.exe` — double-click |
+| macOS | `PocketColony.app` — double-click (right-click → Open the first time, since it is unsigned) |
+| Linux | `chmod +x PocketColony` then `./PocketColony` |
+
+### From source
+
 ```sh
 pip install -r requirements.txt
 python3 main.py
 ```
+
+### Building your own binary
+
+```sh
+packaging/build.sh          # Linux and macOS
+packaging\build.bat         # Windows
+```
+
+Both wrap `pyinstaller PocketColony.spec`, which produces a single ~14 MB
+executable (a `.app` bundle on macOS). A binary only runs on the OS and CPU it
+was built on, so `.github/workflows/build-pocket-colony.yml` builds all three
+on their own runners — push a tag like `pc-v0.3.0`, or start it by hand from
+the Actions tab. The Linux runner is pinned to Ubuntu 22.04 so its output also
+works on older distributions, and it smoke-tests the binary before uploading.
+
+The app icon is generated from the game's own sprites by
+`tools/make_icon.py`, which writes `packaging/icon.png`, `icon.ico` and the
+`icon.iconset` folder macOS turns into an `.icns`.
 
 ### Android
 
@@ -107,7 +139,10 @@ readable in game under Menu → Privacy Policy.
 
 ```
 main.py                 window, integer scaling, keyboard/mouse/touch, main loop
+PocketColony.spec       PyInstaller build for Windows, macOS and Linux
 buildozer.spec          Android packaging
+packaging/              build scripts and the app icon
+tools/make_icon.py      regenerates the icon from the game's sprites
 pocketcolony/
   pixel.py              framebuffer, 5x7 and 4x6 bitmap fonts, primitives
   art.py                sprite pixel data, palettes, outline + rotation baking

@@ -27,7 +27,8 @@ games/
 Browser games: open `games/index.html`, or serve the folder with
 `python3 -m http.server 8000`.
 
-Pocket Colony:
+Pocket Colony ships as a standalone binary — download it from Releases and
+run it, with nothing to install. To run from source instead:
 
 ```sh
 cd games/pocket-colony
@@ -35,11 +36,16 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
+To build binaries for all three desktop platforms, push a tag like `pc-v0.3.0`
+and `.github/workflows/build-pocket-colony.yml` produces a Release with
+Windows, macOS and Linux builds attached.
+
 ## Pocket Colony
 
 A native pixel-art ant colony sim, written from scratch — original code and
 hand-authored sprite data, bitmap fonts, procedurally synthesised sound, no
-third-party assets or engine. Runs on desktop and packages for Android.
+third-party assets or engine. Ships as a one-file executable for Windows,
+macOS and Linux, and packages for Android.
 
 You control one ant directly. Forage and fight on the surface, then walk down
 the shaft into the nest and move room to room to manage it — the chambers are

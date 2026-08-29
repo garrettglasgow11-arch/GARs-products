@@ -1,0 +1,108 @@
+# Builds standalone Pocket Colony binaries for Windows, macOS and Linux.
+#
+# A PyInstaller binary only runs on the OS and CPU it was built on, so each
+# platform is built on its own runner.  Push a tag like `pc-v0.3.0` to get a
+# GitHub Release with all three attached, or run the workflow by hand from the
+# Actions tab to just download the artifacts.
+name: Build Pocket Colony
+
+on:
+  push:
+    tags: ['pc-v*']
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: games/pocket-colony
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 links against an older glibc, so the Linux build also runs
+          # on distributions a few years old rather than only the newest.
+          - os: ubuntu-22.04
+            artifact: PocketColony-linux-x86_64
+            package: tar
+          - os: windows-latest
+            artifact: PocketColony-windows-x86_64
+            package: zip
+          - os: macos-latest
+            artifact: PocketColony-macos-arm64
+            package: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip pyinstaller pygame-ce
+
+      - name: Build the macOS icon
+        if: runner.os == 'macOS'
+        run: iconutil -c icns packaging/icon.iconset -o packaging/icon.icns
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean PocketColony.spec
+
+      - name: Smoke test the binary
+        if: runner.os == 'Linux'
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        # Exit 124 means the timer stopped a healthy game loop; anything else
+        # means it fell over on startup.
+        run: |
+          set +e
+          timeout 12 ./dist/PocketColony
+          code=$?
+          echo "exit code $code"
+          test $code -eq 124
+
+      - name: Stage the release files
+        shell: bash
+        run: |
+          mkdir -p out
+          cp RUN-ME.txt README.md out/
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp -R dist/PocketColony.app out/
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            cp dist/PocketColony.exe out/
+          else
+            cp dist/PocketColony out/
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          cd out
+          if [ "${{ matrix.package }}" = "tar" ]; then
+            tar -czf ../${{ matrix.artifact }}.tar.gz .
+          else
+            7z a ../${{ matrix.artifact }}.zip . || zip -r ../${{ matrix.artifact }}.zip .
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: games/pocket-colony/${{ matrix.artifact }}.*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/pc-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
