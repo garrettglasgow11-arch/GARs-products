@@ -568,18 +568,30 @@ html.blackout #dmgvig{ opacity:.55 !important; background:radial-gradient(circle
 
   /* ============================================== THE RESPONSE TEAM */
   const TEAM = [
+    /* Six people, and until 3.2 they were six copies of one silhouette in
+       six colours. `build` and `hair` are what actually tell them apart at
+       twenty metres; the trim colour only helps once you are close enough to
+       read it. `kind` still drives their combat archetype, but it is cleared
+       off the rig before sculpting so the enemy gear pass does not put a riot
+       helm on Monica. */
     { id: 'flare', name: 'Flare', real: 'Monica', trim: '#FF6A2A', suit: '#3a1a12', armor: '#5a2a16',
-      line: 'Do not get in my way. Do not slow me down.', kind: 'enforcer' },
+      line: 'Do not get in my way. Do not slow me down.', kind: 'enforcer',
+      build: 'lean', hair: 'long', skin: '#c98d63', hairCol: '#241612' },
     { id: 'phantom', name: 'Phantom', real: 'David', trim: '#9fd8ff', suit: '#1a2430', armor: '#243444',
-      line: 'I am not a fighter. I never wanted to be a fighter.', kind: 'grunt', ghost: true },
+      line: 'I am not a fighter. I never wanted to be a fighter.', kind: 'grunt', ghost: true,
+      build: 'runner', hair: 'crop', skin: '#dcb08c', hairCol: '#3a2a1e' },
     { id: 'brick', name: 'Brick', real: 'Marcus', trim: '#FFC64D', suit: '#2c2f38', armor: '#4a4433',
-      line: 'The situation sucks. But I have got powers, and I get to use them?', kind: 'brute' },
+      line: 'The situation sucks. But I have got powers, and I get to use them?', kind: 'brute',
+      build: 'titan', hair: 'crop', pauldron: true, skin: '#8d5a38', hairCol: '#15100c' },
     { id: 'specter', name: 'Specter', real: 'Elena', trim: '#7CFFB2', suit: '#1c2a24', armor: '#2a3c33',
-      line: 'We are not here to be heroes. We are here because we are useful.', kind: 'enforcer' },
+      line: 'We are not here to be heroes. We are here because we are useful.', kind: 'enforcer',
+      build: 'shade', hair: 'long', hood: true, skin: '#b8815c', hairCol: '#1c1410' },
     { id: 'ace', name: 'Ace', real: '—', trim: '#B48CFF', suit: '#191426', armor: '#241c36',
-      line: 'I am here to do a job. Nothing more.', kind: 'stalker' },
+      line: 'I am here to do a job. Nothing more.', kind: 'stalker',
+      build: 'lean', hair: 'crop', mask: true, skin: '#a9764f', hairCol: '#12100f' },
     { id: 'pierce', name: 'Cmdr Pierce', real: 'no powers', trim: '#7C8AA3', suit: '#23262c', armor: '#33383f',
-      line: 'You are tools. And I am the one who decides how you are used.', kind: 'grunt' }
+      line: 'You are tools. And I am the one who decides how you are used.', kind: 'grunt',
+      build: 'heavy', hair: 'crop', pauldron: true, skin: '#d3a274', hairCol: '#59544e' }
   ];
 
   step('team', () => {
@@ -597,6 +609,27 @@ html.blackout #dmgvig{ opacity:.55 !important; background:radial-gradient(circle
           rig.cfg.hair = true;
           rig.cfg.jacket = true;
           rig.cfg.eye = T.trim;
+          // Silhouette first, colour second.
+          rig.cfg.build = T.build;
+          rig.cfg.hairStyle = T.hair;
+          rig.cfg.pauldron = !!T.pauldron;
+          rig.cfg.hood = !!T.hood;
+          rig.cfg.mask = !!T.mask;
+          rig.cfg.helmet = false;
+          rig.cfg.kind = null;          // people, not troops: no enemy gear
+          rig.__tier = 0;
+          if (T.skin) rig.faceSkin = new THREE.MeshStandardMaterial({
+            color: T.skin, roughness: 0.74, metalness: 0
+          });
+          if (T.hairCol) {
+            rig.faceHair = new THREE.MeshStandardMaterial({
+              color: T.hairCol, roughness: 0.80, metalness: 0
+            });
+            rig.faceHairLit = new THREE.MeshStandardMaterial({
+              color: new THREE.Color(T.hairCol).multiplyScalar(1.45),
+              roughness: 0.78, metalness: 0
+            });
+          }
           rig.mats.suit.color.set(T.suit);
           rig.mats.armor.color.set(T.armor);
           rig.mats.trim.color.set(T.trim);

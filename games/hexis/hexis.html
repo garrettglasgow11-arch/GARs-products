@@ -898,7 +898,7 @@ html[data-mode="panel"] #title{display:none !important}
     <div class="tbolt tbolt3"></div>
     <div class="vig"></div>
     <div class="savechip hide" id="savechip">Save · <b>—</b></div>
-    <div class="build">Hexis 3.0 · Stormbreak</div>
+    <div class="build">Hexis 3.2 · Stormbreak</div>
     <div class="plate">
     <h1>HEX<span>I</span>S</h1>
     <div class="sub" id="titlesub">Act I — The Awakening</div>
@@ -18753,7 +18753,7 @@ const Shell = {
     for (const id in relabel) { const b = document.getElementById(id); if (b) b.textContent = relabel[id]; }
     if (sub) sub.textContent = 'The grid is failing and the rain is carrying a charge. Nobody has told you what you are yet.';
     const build = title.querySelector('.build');
-    if (build) build.textContent = 'Hexis 3.0 · Stormbreak';
+    if (build) build.textContent = 'Hexis 3.2 · Stormbreak';
     if (keys) keys.innerHTML =
       '<b>WASD</b> move <b>SPACE</b> jump, twice to double <b>SHIFT</b> run<br>' +
       '<b>LMB</b> sword <b>Q</b> hold to charge the fist <b>E</b> talk <b>TAB</b> skills<br>' +
@@ -21985,7 +21985,7 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
   panel.className = 'hide';
   panel.innerHTML =
     '<div class="side">' +
-    '<h2>Paused</h2><div class="lbl">Hexis 3.0 · Stormbreak</div>' +
+    '<h2>Paused</h2><div class="lbl">Hexis 3.2 · Stormbreak</div>' +
     '<button data-a="resume">Resume</button>' +
     '<button data-a="log" class="on">Job log</button>' +
     '<button data-a="codex">Codex</button>' +
@@ -23104,6 +23104,9 @@ const Tex = {
 const Sculpt = {
   built: 0,
   enabled: true,
+  /* Per-archetype gear hooks. 355-silhouette.js registers into this; the
+     sculpt calls them last so they can measure the body they attach to. */
+  gear: [],
   /* Radial segments on every revolved part.
      A lathe costs (points - 1) * segments * 2 triangles, so this number is
      the single biggest lever on the character budget. Ten is where a forearm
@@ -23114,6 +23117,8 @@ const Sculpt = {
   /* Joint balls get half the rings of a full sphere. They are only ever seen
      as the round bit of an elbow. */
   get ring() { return Input.touch ? 4 : 5; },
+  // Faces are looked at from a metre away; knees are not.
+  get faceSeg() { return Input.touch ? 10 : 16; },
   coatFar: 28 * 28
 };
 
@@ -23169,8 +23174,14 @@ const Sculpt = {
   }
 
   /* A joint ball. This is the part that makes a bent elbow solid. */
-  function ball(r, mat, y = 0, squash = 1) {
-    const geo = new THREE.SphereGeometry(r, Sculpt.seg, Sculpt.ring);
+  /* `seg` overrides the global segment count. Faces get a finer sphere than
+     knees do: at conversation range a 10-segment ball reads as a faceted
+     lump stuck to the head, and the whole face becomes a pile of pebbles.
+     They merge into one buffer per material anyway, so the cost is a few
+     hundred triangles on the handful of rigs that actually have a face. */
+  function ball(r, mat, y = 0, squash = 1, seg) {
+    const g2 = seg || Sculpt.seg;
+    const geo = new THREE.SphereGeometry(r, g2, seg ? Math.round(g2 * 0.55) : Sculpt.ring);
     if (squash !== 1) geo.scale(1, 1, squash);
     const m = new THREE.Mesh(geo, mat);
     m.position.y = y;
@@ -23181,6 +23192,24 @@ const Sculpt = {
   /* A soft box: the rounded-box primitive the base already has, but with a
      heavier bevel so it sits next to revolved parts without looking like it
      came from a different game. */
+  /* A two-sided view of a material, cached per material.
+
+     Partial lathes — an open jacket, a collar, a hood — need DoubleSide or
+     they vanish from the inside. Every version before this set `.side` on the
+     material the mesh was handed, which is the rig's SHARED m.cloth or
+     m.dark: one open jacket turned every cloth and dark surface on the whole
+     character two-sided, so the lit interiors of the torso, the sleeves and
+     the neck hole all rendered through the front and read as blown-out white
+     panels stuck to the chest. Clone once, key off the original, and the
+     merge still only sees two materials instead of twenty. */
+  const TWO = new WeakMap();
+  function twoSided(mat) {
+    let c = TWO.get(mat);
+    if (!c) { c = mat.clone(); c.side = THREE.DoubleSide; TWO.set(mat, c); }
+    return c;
+  }
+  Sculpt.twoSided = twoSided;
+
   function soft(w, h, d, mat, x, y, z, k = 0.42) {
     return plate(w, h, d, mat, x, y, z, k);
   }
@@ -23261,393 +23290,363 @@ const Sculpt = {
      THE BODY
      ====================================================================== */
 
+  /* ======================================================================
+     BUILD PROFILES
+
+     The reason a Grunt, an Enforcer, a Warden and a Brute all looked like the
+     same person in different colours is that they WERE the same person in
+     different colours: one set of hard-coded radii, one head size, one stance.
+     Recolouring is not a silhouette.
+
+     So every dimension the body is made from is a multiplier now, and each
+     archetype gets a profile. These are the numbers that decide whether you
+     can tell what is about to hit you from thirty metres, which is the actual
+     job of an enemy design.
+
+       size      overall height
+       shoulder  deltoid line width — the single strongest read there is
+       chest     ribcage depth and width
+       waist     the other half of the V
+       arm/leg   limb thickness
+       head      skull size against the body (small head = big body)
+       neck      length; none at all reads as brutish
+       stance    hip height — a crouch changes a silhouette more than armour
+       hunch     forward chest lean
+       ape       arm length, for anything that should look wrong
+     ====================================================================== */
+  const BUILDS = {
+    hero:    { size: 1.00, shoulder: 1.00, chest: 1.00, waist: 1.00, arm: 1.00, leg: 1.00, head: 1.00, neck: 1.00, stance: 1.00, hunch: 0.00, ape: 1.00 },
+    // Grunt: the baseline everything else is read against.
+    soldier: { size: 0.98, shoulder: 1.02, chest: 1.00, waist: 1.06, arm: 1.02, leg: 0.98, head: 0.96, neck: 0.95, stance: 0.99, hunch: 0.04, ape: 1.00 },
+    // Enforcer: armoured, upright, thick through the chest.
+    heavy:   { size: 1.10, shoulder: 1.26, chest: 1.18, waist: 1.10, arm: 1.20, leg: 1.12, head: 0.88, neck: 0.70, stance: 0.97, hunch: 0.06, ape: 1.00 },
+    // Warden: wide and low. A wall with legs.
+    tank:    { size: 1.06, shoulder: 1.42, chest: 1.30, waist: 1.24, arm: 1.26, leg: 1.16, head: 0.80, neck: 0.45, stance: 0.90, hunch: 0.10, ape: 0.96 },
+    // Brute: hunched, long-armed, almost no neck, small head. Wrong on purpose.
+    titan:   { size: 1.34, shoulder: 1.58, chest: 1.34, waist: 1.10, arm: 1.42, leg: 1.20, head: 0.70, neck: 0.28, stance: 0.86, hunch: 0.26, ape: 1.18 },
+    // Swarmer: small, spindly, pitched forward.
+    runner:  { size: 0.80, shoulder: 0.82, chest: 0.80, waist: 0.84, arm: 0.80, leg: 1.02, head: 1.08, neck: 1.10, stance: 0.94, hunch: 0.20, ape: 1.06 },
+    // Lancer: tall, narrow, long limbs. A rifle on a stick.
+    lean:    { size: 1.06, shoulder: 0.90, chest: 0.86, waist: 0.86, arm: 0.88, leg: 1.14, head: 0.94, neck: 1.20, stance: 1.04, hunch: -0.04, ape: 1.10 },
+    // Stalker: thin, low, coiled.
+    shade:   { size: 0.96, shoulder: 0.92, chest: 0.88, waist: 0.86, arm: 0.94, leg: 1.06, head: 0.92, neck: 1.05, stance: 0.92, hunch: 0.16, ape: 1.08 },
+    // Rex: ordinary man, carried well.
+    mentor:  { size: 1.02, shoulder: 1.06, chest: 1.04, waist: 1.02, arm: 1.00, leg: 1.00, head: 0.96, neck: 1.00, stance: 1.00, hunch: 0.02, ape: 1.00 },
+    // Kell: seven feet of him.
+    kell:    { size: 1.30, shoulder: 1.48, chest: 1.28, waist: 1.08, arm: 1.30, leg: 1.22, head: 0.86, neck: 0.55, stance: 1.02, hunch: 0.08, ape: 1.06 },
+    civ:     { size: 0.96, shoulder: 0.92, chest: 0.94, waist: 1.00, arm: 0.92, leg: 0.98, head: 1.02, neck: 1.00, stance: 1.00, hunch: 0.04, ape: 1.00 }
+  };
+  Sculpt.BUILDS = BUILDS;
+
   function sculpt(rig) {
-    const S = rig.S, m = rig.mats, cfg = rig.cfg, j = rig.j;
+    const S0 = rig.S, m = rig.mats, cfg = rig.cfg, j = rig.j;
     const keep = protectedSet(rig);
     const face = !!cfg.face;
-    const heavy = !!cfg.heavy;
-    const slim = cfg.slim ? 0.86 : 1;
+    const B = BUILDS[cfg.build] || BUILDS[cfg.heavy ? 'heavy' : 'hero'];
+    rig.__build = B;
+    // Overall size rides on the rig's own scale so a cfg.scale of 1.3 and a
+    // build size of 1.3 compose rather than fight.
+    const S = S0 * B.size;
+    rig.__S = S;
 
     /* --- pelvis ------------------------------------------------------- */
     strip(j.hips, keep);
+    j.hips.position.y = 0.92 * S0 * B.size * B.stance;
+    const wR = 0.162 * S * B.waist;
     j.hips.add(lathe([
-      [0.108 * S, -0.16 * S], [0.150 * S, -0.10 * S], [0.162 * S, 0.0],
-      [0.150 * S, 0.06 * S], [0.124 * S, 0.10 * S]
-    ], m.dark, { squash: 0.80, wide: heavy ? 1.12 : 1 }));
-    // Belt: a real band with a buckle, so the torso and the legs are two
-    // garments rather than one tube.
+      [wR * 0.67, -0.16 * S], [wR * 0.93, -0.10 * S], [wR, 0.0],
+      [wR * 0.93, 0.06 * S], [wR * 0.77, 0.10 * S]
+    ], m.dark, { squash: 0.80 }));
     j.hips.add(lathe([
-      [0.162 * S, 0.02 * S], [0.174 * S, 0.05 * S], [0.174 * S, 0.10 * S], [0.162 * S, 0.13 * S]
-    ], m.armor, { squash: 0.82, wide: heavy ? 1.12 : 1 }));
-    j.hips.add(chip(0.09 * S, 0.068 * S, 0.045 * S, m.trim, 0, 0.075 * S, 0.132 * S, 0.3));
+      [wR, 0.02 * S], [wR * 1.07, 0.05 * S], [wR * 1.07, 0.10 * S], [wR, 0.13 * S]
+    ], m.armor, { squash: 0.82 }));
+    j.hips.add(chip(0.09 * S, 0.068 * S, 0.045 * S, m.trim, 0, 0.075 * S, wR * 0.82, 0.3));
+
+    /* --- layering rails --------------------------------------------------
+       Two rules, and v4 broke both of them everywhere.
+
+       1. Every coaxial shell in a stack shares ONE squash value. A chest at
+          squash 0.72 and a jacket at 0.74 are 11mm apart at the front and 4mm
+          apart on the flanks — and they cross somewhere in between. That
+          crossing is why the whole torso rendered as diagonal hatching.
+       2. Clearances are ABSOLUTE, never a multiplier. `chR * 1.08` reads as
+          "8% bigger" and lands as 4mm on a 0.2 radius, which is inside the
+          depth buffer's ability to tell them apart at arm's length.
+
+       So: one squash per family, and a garment clears the body by CLOTH, a
+       plate clears the garment by PLATE, trim clears the plate by TRIM. If a
+       part cannot afford its clearance, it belongs in the profile underneath
+       rather than as another shell on top. That collapsed the upper arm from
+       four coaxial surfaces to one.                                          */
+    const SQT = 0.82;                  // torso family
+    const SQA = 0.93;                  // arm family
+    const SQL = 0.90;                  // leg family
+    const CLOTH = 0.021 * S;           // garment over body
+    const PLATE = 0.016 * S;           // armour over garment
+    const TRIM = 0.010 * S;            // trim over armour
+    // Same profile, pushed out along its own radius. Cheaper to read than
+    // writing every number twice, and it cannot drift.
+    const grow = (p, d) => p.map(([r, y]) => [r + d, y]);
+    // The torso is the largest revolved surface on the character and the one
+    // the key light lands flat on. At the shared segment count it reads as a
+    // folded plank; four more sides costs ~90 triangles and fixes it.
+    const TSEG = Sculpt.seg + (Input.touch ? 2 : 5);
+    // Limbs are smaller but there are eight of them and they are all cylinders
+    // pointed at the key light. Three extra sides each.
+    const LSEG = Sculpt.seg + (Input.touch ? 1 : 3);
 
     /* --- torso -------------------------------------------------------- */
     strip(j.chest, keep);
-    const chestW = (heavy ? 1.16 : 1) * slim;
-    // The V: narrow at the waist, widest at the deltoid line, tucked back in
-    // at the collar. This profile is the whole stylised read.
-    /* Radii, not diameters. The base rig's ribcage plate is 0.42 S across and
-       its upper chest 0.48 S, so 0.21 S is the widest this can be without the
-       character reading as a barrel — which is exactly what the first cut of
-       this did. The V comes from the RATIO between waist and shoulder, not
-       from making the shoulder bigger. */
-    j.chest.add(lathe([
-      [0.128 * S, 0.02 * S],
-      [0.152 * S, 0.14 * S],
-      [0.184 * S, 0.28 * S],
-      [0.205 * S, 0.42 * S],
-      [0.206 * S, 0.52 * S],
-      [0.168 * S, 0.60 * S],
-      [0.100 * S, 0.655 * S]
-    ], m.suit, { squash: 0.72, wide: chestW }));
+    j.chest.rotation.x = B.hunch * 0.5;
+    const shR = 0.210 * S * B.shoulder;
+    const chR = 0.194 * S * B.chest;
+    const wsR = 0.124 * S * B.waist;
+    const nkR = 0.060 * S * (0.72 + B.neck * 0.28);
 
-    // Pectoral shelf and abdominal break — two shallow revolved bands rather
-    // than sculpted muscle. At this scale that is all the read needs.
-    j.chest.add(lathe([
-      [0.196 * S, 0.34 * S], [0.208 * S, 0.40 * S], [0.200 * S, 0.47 * S]
-    ], m.armor, { squash: 0.76, wide: chestW }));
+    /* One surface from waist to trapezius. The pectoral shelf and the rib
+       taper are bends in this profile, not shells bolted over it. The V comes
+       from the RATIO of waist to shoulder; widening the shoulder alone just
+       gives a barrel. The last two points roll the neck hole inward and back
+       down, so no angle can see the inside of the chest — which, with an
+       open-front jacket and an open-top collar, every angle could. */
+    const TORSO = [
+      [wsR * 0.96, -0.02 * S],
+      [wsR * 1.00, 0.04 * S],
+      [wsR * 1.13, 0.15 * S],
+      [chR * 0.94, 0.26 * S],
+      [chR * 1.00, 0.355 * S],
+      [chR * 0.98, 0.445 * S],
+      [shR, 0.530 * S],
+      [shR * 0.74, 0.608 * S],
+      [nkR * 1.28, 0.660 * S],
+      [nkR * 0.90, 0.666 * S],
+      [nkR * 0.84, 0.638 * S]
+    ];
+    j.chest.add(lathe(TORSO, m.suit, { squash: SQT, seg: TSEG }));
 
-    /* --- the jacket ----------------------------------------------------
-       A partial revolve: `phiLength` short of a full turn leaves the front
-       open, which is how you get an open jacket out of a lathe. The lapels
-       and the collar are separate so they can flare. */
-    if (cfg.coat || cfg.jacket !== false) {
-      const open = 0.62;                       // radians of gap at the front
-      const jk = lathe([
-        [0.150 * S, -0.05 * S],
-        [0.178 * S, 0.08 * S],
-        [0.205 * S, 0.28 * S],
-        [0.222 * S, 0.44 * S],
-        [0.214 * S, 0.545 * S],
-        [0.160 * S, 0.60 * S]
-      ], m.cloth, {
-        squash: 0.74, wide: chestW,
-        phiStart: open / 2, phiLength: Math.PI * 2 - open
+    /* --- the jacket ---------------------------------------------------- */
+    const jacket = cfg.jacket !== false;
+    const open = 0.40;
+    const jkR = (y) => {                              // jacket radius at height
+      for (let i = 1; i < 8; i++) {
+        const [r0, y0] = TORSO[i - 1], [r1, y1] = TORSO[i];
+        if (y <= y1 || i === 7) {
+          const t = Math.max(0, Math.min(1, (y - y0) / (y1 - y0 || 1)));
+          return r0 + (r1 - r0) * t + CLOTH;
+        }
+      }
+      return chR + CLOTH;
+    };
+    if (jacket) {
+      const JK = grow(TORSO.slice(0, 8), CLOTH);
+      JK.unshift([wsR * 1.02 + CLOTH, -0.13 * S]);     // a hem below the belt
+      const jk = lathe(JK, m.cloth, {
+        squash: SQT, seg: TSEG, phiStart: open / 2, phiLength: Math.PI * 2 - open
       });
-      jk.material = m.cloth;
-      // Open geometry, so it has to be two-sided or you see through the back
-      // of the lapel every time the camera swings round.
-      jk.material.side = THREE.DoubleSide;
+      jk.material = twoSided(m.cloth);
       j.chest.add(jk);
 
-      // Lapels: tapered panels folded back off the opening.
+      /* Lapels: partial lathes riding the jacket's own curve, one clearance
+         out. v4 used flat boxes, which cut through the jacket at the sides
+         and read as two white planks nailed to the chest. */
       for (const side of [-1, 1]) {
-        const lap = taper(0.105 * S, 0.045 * S, 0.38 * S, 0.045 * S, m.cloth,
-          side * 0.088 * S, 0.34 * S, 0.146 * S);
-        lap.rotation.z = side * 0.22;
-        lap.rotation.y = side * -0.42;
-        j.chest.add(lap);
+        const lp = lathe([
+          [jkR(0.30 * S) + TRIM * 0.9, 0.300 * S],
+          [jkR(0.40 * S) + TRIM * 1.4, 0.400 * S],
+          [jkR(0.49 * S) + TRIM * 1.5, 0.490 * S],
+          [jkR(0.56 * S) + TRIM * 1.0, 0.562 * S]
+        ], m.dark, {
+          squash: SQT,
+          phiStart: side > 0 ? open / 2 - 0.02 : -open / 2 - 0.28,
+          phiLength: 0.30
+        });
+        lp.material = twoSided(m.dark);
+        j.chest.add(lp);
       }
-      // Stand collar, revolved and tipped outwards.
-      // A collar that reaches the jaw swallows the face. This stops at the
-      // base of the neck and only tips out at the very top.
+
+      /* Collar: rises, then folds back down. The fold is what closes the rim
+         — an open-top lathe let you look straight down the neck. */
+      const cR = nkR * 1.30 + CLOTH;
       const col = lathe([
-        [0.108 * S, 0.585 * S], [0.126 * S, 0.645 * S], [0.134 * S, 0.688 * S]
-      ], m.cloth, { squash: 0.86, phiStart: 0.5, phiLength: Math.PI * 2 - 1.0 });
-      col.material.side = THREE.DoubleSide;
+        [cR * 0.98, 0.590 * S], [cR * 1.06, 0.652 * S], [cR * 1.02, 0.702 * S],
+        [cR * 0.90, 0.696 * S], [cR * 0.94, 0.604 * S]
+      ], m.cloth, {
+        squash: 0.90, phiStart: open / 2 + 0.16, phiLength: Math.PI * 2 - open - 0.32
+      });
+      col.material = twoSided(m.cloth);
       j.chest.add(col);
+
+      // Zip: sits in the OPENING, on the shirt, so it never touches the
+      // jacket surface at all.
+      j.chest.add(chip(0.011 * S, 0.46 * S, 0.018 * S, m.armor,
+        0, 0.28 * S, (chR + 0.004 * S) * SQT, 0.3));
+      for (const side of [-1, 1]) {
+        const pk = chip(0.070 * S, 0.052 * S, 0.026 * S, m.armor,
+          side * 0.105 * S, 0.135 * S, jkR(0.135 * S) * SQT + 0.004 * S, 0.3);
+        pk.rotation.y = side * -0.30;
+        j.chest.add(pk);
+      }
     }
 
-    // Hex core — the name, worn on the chest. Rebuilt only if the base one was
-    // removed; normally it is a named reference and survives the strip.
-    if (!rig.hex || !rig.hex.parent) {
-      const hex = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.068 * S, 0.068 * S, 0.035 * S, 6), m.trim);
-      hex.rotation.x = Math.PI / 2;
-      hex.position.set(0, 0.44 * S, 0.150 * S);
-      j.chest.add(hex);
-      rig.hex = hex;
+    // Collarbones: on the garment, one clearance out, and short enough to
+    // stay off the deltoid line.
+    for (const side of [-1, 1]) {
+      const cb = chip(shR * 0.50, 0.020 * S, 0.040 * S, m.armor,
+        side * shR * 0.40, 0.548 * S,
+        (jacket ? jkR(0.548 * S) : shR * 0.72) * SQT * 0.62 + PLATE, 0.35);
+      cb.rotation.z = side * -0.12;
+      cb.rotation.y = side * -0.18;
+      j.chest.add(cb);
     }
 
-    /* The base rig builds the hex core at 0.11 S radius — 22 cm across on a
-       1.8 m body, which with an unlit emissive material reads as a car
-       headlight bolted to the sternum. It survives the strip because the
-       animation code holds it by name, so it is resized rather than rebuilt. */
     if (rig.hex && rig.hex.parent && !rig.hex.__resized) {
       rig.hex.__resized = true;
       rig.hex.geometry.dispose();
-      rig.hex.geometry = new THREE.CylinderGeometry(0.068 * S, 0.068 * S, 0.035 * S, 6);
-      rig.hex.position.set(0, 0.44 * S, 0.150 * S);
+      rig.hex.geometry = new THREE.CylinderGeometry(0.062 * S, 0.062 * S, 0.030 * S, 6);
+      rig.hex.position.set(0, 0.42 * S, (chR + 0.006 * S) * SQT + 0.010 * S);
+    }
+
+    if (rig.__tier > 0 && j.chest) {
+      const cz = (jacket ? jkR(0.50 * S) : chR) * SQT;
+      for (let i = 0; i < Math.min(4, rig.__tier); i++) {
+        const cv = chip((0.13 - i * 0.016) * S, 0.017 * S, 0.022 * S, m.trim,
+          0, (0.500 - i * 0.036) * S, cz * 0.80 + PLATE, 0.3);
+        cv.rotation.x = -0.20;
+        j.chest.add(cv);
+      }
     }
 
     /* --- neck and head -------------------------------------------------- */
     strip(j.head, keep);
-    /* Stylisation multiplier on the head. 1.35 put the skull at 30 cm across
-       on a 1.8 m body, which is past cartoon and into bobblehead. 1.18 lands
-       at about 26 cm — clearly stylised, still a person. */
-    const H = 1.30;
+    j.head.position.y = 0.665 * S;
+    /* Head scale. v4 ran at 1.30 and every character was a bobblehead: the
+       skull alone was a fifth of standing height before the hair went on.
+       1.12 lands around 1/6.4 with hair, which is the stylised-but-not-silly
+       band Fortnite sits in. */
+    const H = 1.12 * B.head;
+    const nR = nkR;
     j.head.add(lathe([
-      [0.052 * S, -0.05 * S], [0.058 * S, 0.01 * S], [0.055 * S, 0.055 * S]
-    ], m.dark, { squash: 0.92 }));
+      [nR * 0.96, -0.055 * S], [nR * 1.06, 0.010 * S],
+      [nR * 1.02, 0.062 * S], [nR * 0.92, 0.090 * S]
+    ], m.dark, { squash: 0.90 }));
 
-    // Skull: an egg, widest just above the ear line, flattened at the back.
-    const skull = lathe([
-      [0.0001, -0.132 * S * H],
-      [0.062 * S * H, -0.116 * S * H],
-      [0.096 * S * H, -0.062 * S * H],
-      [0.108 * S * H, 0.0],
-      [0.112 * S * H, 0.052 * S * H],
-      [0.103 * S * H, 0.100 * S * H],
-      [0.074 * S * H, 0.140 * S * H],
-      [0.0001, 0.158 * S * H]
-    ], face ? (rig.faceSkin || m.dark) : m.dark, { squash: 0.96 });
-    skull.position.y = 0.20 * S;
-    skull.scale.z = 1.06;                        // slightly long front to back
+    /* Skull profile, kept on the rig so the face can ask how wide the head is
+       at a given height. v4 placed every feature at the head's EQUATOR radius
+       regardless of height, so the eyes and mouth floated in front of the
+       face on a flat plane and shimmered against it. */
+    const SKULL = [
+      [0.0001, -0.128 * S * H],
+      [0.058 * S * H, -0.112 * S * H],
+      [0.092 * S * H, -0.058 * S * H],
+      [0.106 * S * H, 0.0],
+      [0.110 * S * H, 0.050 * S * H],
+      [0.101 * S * H, 0.098 * S * H],
+      [0.072 * S * H, 0.138 * S * H],
+      [0.0001, 0.156 * S * H]
+    ];
+    const skull = lathe(SKULL, face ? (rig.faceSkin || m.dark) : m.dark, { squash: 0.96 });
+    const SKY = 0.150 * S;
+    skull.position.y = SKY;
+    skull.scale.z = 1.07;
     j.head.add(skull);
     rig.skull = skull;
+    rig.__skull = { p: SKULL, y: SKY, sx: 1, sz: 1.07 * 0.96 };
 
-    if (face) {
-      const skin = rig.faceSkin || m.dark;
-      const HR = 0.108 * S * H;                 // skull radius at the eye line
-      const HZ = HR * 1.02;                     // ...and its depth after squash
+    if (face) buildFace(rig, j, m, S, H, cfg);
+    else buildHelmet(rig, j, m, S, H, cfg);
 
-      /* The first cut of this face was a stack of flat boxes glued to the
-         front of the skull: a brow chip, two socket chips, a full-width mask
-         and a mouth bar. Every one of them was a plane facing the camera, so
-         a head built out of a smooth revolved skull rendered as a slab —
-         precisely the blockiness this whole pass exists to remove.
-
-         The rule now: nothing is stuck ON the face. Features are either part
-         of the skull's own silhouette (jaw, nose, ears) or set INTO it (eyes,
-         mouth), positioned so their outer surface lands flush with the skull
-         rather than proud of it. */
-
-      /* No jaw box. The first attempt hung a tapered slab under the skull for
-         a jaw; `taper` scales a unit-width rounded box in X, which scales its
-         bevel with it, so a narrow taper comes out with an almost hard edge —
-         a flat-fronted slab across the entire lower face. The skull profile
-         already reaches below the mouth line, so the jaw only needs a chin. */
-      const chin = ball(0.040 * S * H, skin, 0);
-      chin.scale.set(1.10, 0.70, 0.90);
-      chin.position.set(0, 0.118 * S, 0.046 * S * H);
-      j.head.add(chin);
-
-      // Cheekbones: two flattened balls, which is what turns a sphere into a
-      // face at this level of abstraction.
-      for (const side of [-1, 1]) {
-        const ck = ball(0.034 * S * H, skin, 0);
-        ck.scale.set(0.85, 0.52, 0.70);
-        ck.position.set(side * 0.058 * S * H, 0.176 * S, 0.074 * S * H);
-        j.head.add(ck);
-      }
-
-      // Nose: a tapered wedge off the centre line, small and low.
-      const nose = taper(0.026 * S * H, 0.044 * S * H, 0.052 * S * H, 0.052 * S * H,
-        skin, 0, 0.196 * S, 0.104 * S * H);
-      nose.rotation.x = 0.12;
-      j.head.add(nose);
-
-      // Ears.
-      for (const side of [-1, 1]) {
-        const ear = ball(0.032 * S * H, skin, 0);
-        ear.scale.set(0.40, 1.20, 0.86);
-        ear.position.set(side * 0.104 * S * H, 0.198 * S, -0.004 * S);
-        j.head.add(ear);
-      }
-
-      // Eyes. Large — that is the stylisation — and seated so the front of
-      // the ball is flush with the skull surface rather than floating off it.
-      const white = rig.eyeWhite || (rig.eyeWhite = new THREE.MeshStandardMaterial({
-        color: '#eef4fb', roughness: 0.22, metalness: 0
-      }));
-      const iris = rig.eyeIris || (rig.eyeIris = new THREE.MeshBasicMaterial({
-        color: cfg.eye || cfg.trim || '#5FE3FF', fog: false
-      }));
-      const eyeR = 0.034 * S * H;
-      const eyeX = 0.054 * S * H, eyeY = 0.212 * S;
-      rig.eyes = [];
-      for (const side of [-1, 1]) {
-        const e = ball(eyeR, white);
-        e.scale.set(1, 0.94, 0.62);
-        e.position.set(side * eyeX, eyeY, HZ - eyeR * 0.62);
-        j.head.add(e);
-        const ir = new THREE.Mesh(new THREE.CircleGeometry(eyeR * 0.62, 10), iris);
-        ir.position.set(side * eyeX, eyeY, HZ + 0.001 * S);
-        j.head.add(ir);
-        rig.eyes.push(ir);
-        // Upper lid: a thin curved slice of skin over the top of the ball, so
-        // the eye is set under a brow rather than painted on.
-        const lid = ball(eyeR * 1.06, skin, 0);
-        lid.scale.set(1, 0.42, 0.62);
-        lid.position.set(side * eyeX, eyeY + eyeR * 0.68, HZ - eyeR * 0.66);
-        j.head.add(lid);
-      }
-
-      // Brows: small tapered wedges following the lid, angled inwards.
-      for (const side of [-1, 1]) {
-        const b2 = taper(0.052 * S * H, 0.026 * S * H, 0.016 * S * H, 0.020 * S * H,
-          rig.faceHair || m.dark, side * eyeX, eyeY + eyeR * 1.25, HZ - eyeR * 0.35);
-        b2.rotation.z = side * -0.20;
-        b2.rotation.y = side * 0.25;
-        j.head.add(b2);
-      }
-
-      // Mouth: a shallow inset, not a bar stuck on the chin.
-      const mouth = ball(0.017 * S * H, rig.faceMouth || m.dark, 0);
-      mouth.scale.set(1.9, 0.30, 0.45);
-      mouth.position.set(0, 0.152 * S, HZ * 0.88);
-      j.head.add(mouth);
-
-      // The half-mask is opt-in and covers the mouth only. It was full-face
-      // and near-white, which turned the one surface the camera gets close to
-      // into a blank panel.
-      if (cfg.mask) {
-        const mask = lathe([
-          [0.086 * S * H, 0.132 * S], [0.098 * S * H, 0.158 * S], [0.086 * S * H, 0.182 * S]
-        ], rig.faceMask || m.armor, { squash: 0.98, phiStart: -0.62, phiLength: 1.24 });
-        mask.material.side = THREE.DoubleSide;
-        j.head.add(mask);
-      }
-
-      /* Hair.
-
-         The first version was six tapered clumps radiating off the crown with
-         a shared outward tilt, which produced a spiked halo — a crown of
-         blades rather than a haircut.
-
-         This is a fitted cap plus a fringe. The cap is a revolved shell that
-         follows the skull and stops at the hairline, so there is hair
-         *everywhere* there should be; the fringe is four short pieces angled
-         DOWN and FORWARD over the brow, which is how hair falls. The two
-         side pieces sweep back past the ears rather than out. */
-      if (cfg.hair !== false) {
-        const hairA = rig.faceHair || m.dark;
-        const hairB = rig.faceHairLit || hairA;
-        const HRR = 0.108 * S * H;
-
-        // One closed cap over the whole crown, front included. The two-piece
-        // version left a gap at the hairline that showed bare skull between
-        // the fringe pieces.
-        // Every radius here has to clear the skull profile underneath, or
-        // the crown pokes through the cap and the character goes bald on top.
-        const cap = lathe([
-          [HRR * 1.10, 0.212 * S],
-          [HRR * 1.13, 0.268 * S],
-          [HRR * 1.06, 0.324 * S],
-          [HRR * 0.80, 0.382 * S],
-          [0.0001, 0.418 * S]
-        ], hairA, { squash: 0.99 });
-        j.head.add(cap);
-
-        /* Fringe. A taper is built along its own +Y, so a piece that should
-           hang DOWN over the brow needs to be rotated most of the way over —
-           the first pass used a small negative tilt, which left every strand
-           jutting forwards off the forehead like a visor. */
-        const fringe = [
-          [0.000, 0.318, 0.070, 0.062, 0.088, 0.00, 2.45, hairB],
-          [0.052, 0.314, 0.062, 0.052, 0.078, -0.20, 2.35, hairB],
-          [-0.052, 0.314, 0.062, 0.052, 0.078, 0.20, 2.35, hairA],
-          [0.088, 0.306, 0.038, 0.044, 0.066, -0.38, 2.25, hairA],
-          [-0.088, 0.306, 0.038, 0.044, 0.066, 0.38, 2.25, hairA]
-        ];
-        for (const [x, y, z, w, h, rz, rx, mat] of fringe) {
-          const c = taper(w * S * H, w * 0.34 * S * H, h * S * H, w * 0.66 * S * H,
-            mat, x * S * H, y * S, z * S * H);
-          c.rotation.z = rz;
-          c.rotation.x = rx;
-          j.head.add(c);
-        }
-        // Side sweeps, back past the ear.
-        for (const side of [-1, 1]) {
-          const sw = taper(0.058 * S * H, 0.026 * S * H, 0.115 * S * H, 0.050 * S * H,
-            hairA, side * 0.098 * S * H, 0.268 * S, -0.030 * S * H);
-          sw.rotation.z = side * 0.42;
-          sw.rotation.x = 0.30;
-          j.head.add(sw);
-        }
-      }
-    } else {
-      // Helmet: a smooth shell with a visor band, for anything that is not
-      // meant to have a readable face.
-      j.head.add(lathe([
-        [0.0001, 0.318 * S], [0.070 * S, 0.300 * S], [0.108 * S, 0.245 * S],
-        [0.120 * S, 0.180 * S], [0.112 * S, 0.120 * S], [0.088 * S, 0.088 * S]
-      ], m.armor, { squash: 0.96 }));
-      j.head.add(chip(0.185 * S, 0.042 * S, 0.055 * S, m.trim, 0, 0.205 * S, 0.098 * S, 0.4));
-      j.head.add(chip(0.150 * S, 0.070 * S, 0.045 * S, m.dark, 0, 0.150 * S, 0.100 * S, 0.45));
-    }
     if (cfg.hood) {
       const hood = lathe([
-        [0.135 * S, 0.10 * S], [0.185 * S, 0.20 * S], [0.190 * S, 0.30 * S], [0.130 * S, 0.36 * S]
-      ], m.cloth, { squash: 1.05, phiStart: 0.55, phiLength: Math.PI * 2 - 1.1 });
-      hood.material.side = THREE.DoubleSide;
+        [0.118 * S * H + CLOTH, SKY - 0.05 * S], [0.150 * S * H + CLOTH, SKY + 0.05 * S],
+        [0.150 * S * H + CLOTH, SKY + 0.13 * S], [0.100 * S * H + CLOTH, SKY + 0.20 * S]
+      ], m.cloth, { squash: 1.04, phiStart: 0.55, phiLength: Math.PI * 2 - 1.1 });
+      hood.material = twoSided(m.cloth);
       j.head.add(hood);
     }
     if (cfg.crest) {
-      j.head.add(taper(0.05 * S, 0.012 * S, 0.24 * S, 0.10 * S, m.trim, 0, 0.34 * S, -0.03 * S));
+      j.head.add(taper(0.045 * S, 0.010 * S, 0.20 * S, 0.085 * S, m.trim,
+        0, SKY + 0.14 * S, -0.03 * S));
     }
 
     /* --- arms ---------------------------------------------------------- */
     for (const side of [-1, 1]) {
-      const tag = side < 0 ? 'L' : 'R';
       const arm = side < 0 ? rig.armL : rig.armR;
       if (!arm) continue;
       strip(arm.sh, keep);
       strip(arm.el, keep);
       if (arm.hand) strip(arm.hand, keep);
 
-      const upR = 0.078 * S * (heavy ? 1.22 : 1);
-      const elR = 0.062 * S * (heavy ? 1.18 : 1);
-      // Deltoid ball at the shoulder: solid at any raise angle.
-      arm.sh.add(ball(upR * 1.28, m.suit, 0, 0.92));
-      arm.sh.add(limbGeo(upR, elR, 0.30 * S, m.suit));
-      // Sleeve cuff over the bicep, so the jacket has a sleeve.
-      if (cfg.coat || cfg.jacket !== false) {
-        arm.sh.add(lathe([
-          [upR * 1.16, 0.03 * S], [upR * 1.22, -0.06 * S], [elR * 1.24, -0.26 * S]
-        ], m.cloth, { squash: 0.95 }));
+      arm.sh.position.set(side * 0.252 * S0 * B.shoulder * 0.92, 0.520 * S, 0);
+      const upR = 0.073 * S * B.arm;
+      const elR = 0.055 * S * B.arm;
+      const wrR = 0.045 * S * B.arm;
+      const upL = 0.290 * S * B.ape;
+      const foL = 0.262 * S * B.ape;
+      arm.el.position.y = -upL;
+
+      /* ONE surface for the whole upper arm. The deltoid cap, the bicep and
+         the taper into the elbow are bends in this profile. v4 stacked a
+         sphere, a limb cylinder, a bicep lathe and a sleeve inside a 4mm
+         band and they shredded each other. */
+      const UP = [
+        [0.0001, 0.098 * S],
+        [upR * 0.94, 0.062 * S],
+        [upR * 1.20, 0.010 * S],
+        [upR * 1.14, -0.055 * S],
+        [upR * 1.00, -upL * 0.44],
+        [elR * 1.20, -upL * 0.78],
+        [elR * 1.06, -upL],
+        [elR * 0.92, -upL - 0.022 * S]
+      ];
+      arm.sh.add(lathe(UP, m.suit, { squash: SQA, seg: LSEG }));
+
+      if (jacket) {
+        // Sleeve: the same surface a clothing-thickness out, stopping short
+        // of the elbow so the cuff edge reads as a hem.
+        const SL = grow(UP.slice(1, 6), CLOTH);
+        SL.push([elR * 1.20 + CLOTH * 0.7, -upL * 0.80]);
+        SL.push([elR * 1.14 + CLOTH * 0.2, -upL * 0.82]);
+        arm.sh.add(lathe(SL, m.cloth, { squash: SQA, seg: LSEG }));
       }
       if (cfg.pauldron) {
+        /* A cap that sits ON the shoulder, not a wing off it. v4 ran to
+           1.95x the arm radius, which put the outer edge nearly twice the
+           torso's own half-width out on each side. */
+        const base = (jacket ? upR * 1.20 + CLOTH : upR * 1.20);
         const pd = lathe([
-          [0.055 * S, 0.09 * S], [0.135 * S, 0.045 * S], [0.150 * S, -0.03 * S], [0.135 * S, -0.075 * S]
-        ], m.armor, { squash: 0.86 });
-        pd.position.set(side * 0.025 * S, 0.02 * S, 0);
+          [base * 0.42, 0.118 * S],
+          [base * 1.02 + PLATE, 0.062 * S],
+          [base * 1.16 + PLATE, -0.014 * S],
+          [base * 1.10 + PLATE, -0.086 * S],
+          [base * 0.96 + PLATE, -0.098 * S]
+        ], m.armor, { squash: 0.90, seg: LSEG });
         arm.sh.add(pd);
-        arm.sh.add(chip(0.036 * S, 0.013 * S, 0.12 * S, m.trim, side * 0.10 * S, 0.055 * S, 0, 0.35));
+        arm.sh.add(chip(0.030 * S, 0.011 * S, 0.10 * S, m.trim,
+          side * base * 0.86, 0.060 * S, 0, 0.35));
       }
 
-      // Elbow ball, then a forearm that tapers hard into the wrist.
-      arm.el.add(ball(elR * 1.16, m.suit, 0, 0.94));
-      arm.el.add(limbGeo(elR, 0.046 * S, 0.27 * S, m.suit));
-      // Gauntlet: a revolved cuff plus a lit strip. The strip is the read that
-      // says the arm is the weapon.
-      arm.el.add(lathe([
-        [elR * 1.08, -0.10 * S], [elR * 1.14, -0.17 * S], [0.052 * S, -0.27 * S]
-      ], m.armor, { squash: 0.94 }));
+      /* Forearm, elbow included in the profile, and a gaunttlet over the
+         lower half at one plate clearance. */
+      const FO = [
+        [0.0001, 0.070 * S],
+        [elR * 1.08, 0.030 * S],
+        [elR * 1.14, -0.022 * S],
+        [elR * 1.00, -foL * 0.38],
+        [wrR * 1.12, -foL * 0.78],
+        [wrR, -foL],
+        [wrR * 0.86, -foL - 0.016 * S]
+      ];
+      arm.el.add(lathe(FO, m.suit, { squash: SQA, seg: LSEG }));
+      arm.el.add(lathe(grow(FO.slice(3, 6), PLATE), m.armor, { squash: SQA, seg: LSEG }));
       for (let i = 0; i < 3; i++) {
-        arm.el.add(chip(0.010 * S, 0.010 * S, 0.022 * S, m.trim,
-          (-0.019 + i * 0.019) * S, -0.20 * S, 0.046 * S, 0.3));
+        arm.el.add(chip(0.009 * S, 0.009 * S, 0.018 * S, m.trim,
+          (-0.017 + i * 0.017) * S, -foL * 0.70,
+          (wrR + PLATE) * SQA + 0.006 * S, 0.3));
       }
 
       if (arm.hand) {
-        // A mitt, not a claw: one mass with a thumb and two shallow finger
-        // splits. Oversized on purpose.
-        const hw = 0.075 * S, hh = 0.115 * S, hd = 0.098 * S;
-        const palm = soft(hw * 2, hh, hd, m.dark, 0, -0.055 * S, 0.004 * S, 0.46);
-        arm.hand.add(palm);
-        arm.hand.add(chip(hw * 1.9, 0.022 * S, hd * 0.9, m.armor, 0, -0.012 * S, 0.012 * S, 0.4));
-        // Fingers as one block with two grooves cut by dark slivers — three
-        // separate finger meshes at this scale is detail nobody can resolve
-        // and geometry everybody pays for.
-        const fing = taper(hw * 1.92, hw * 1.74, 0.070 * S, hd * 0.96, m.dark,
-          0, -0.142 * S, 0.010 * S);
-        arm.hand.add(fing);
-        // Two shallow grooves, inset rather than proud. Standing them off the
-        // surface in a contrasting material turned the hand into a four-prong
-        // fork at any distance under three metres.
-        for (const gx of [-0.020, 0.020]) {
-          arm.hand.add(chip(0.005 * S, 0.056 * S, hd * 0.55, m.dark,
-            gx * S, -0.150 * S, 0.052 * S, 0.2));
-        }
-        // A lathe for a thumb is 120 triangles for something the size of a
-        // fingernail. A chip is twelve and reads identically.
-        const thumb = chip(0.034 * S, 0.075 * S, 0.040 * S, m.dark, 0, 0, 0, 0.45);
-        thumb.position.set(side * 0.062 * S, -0.078 * S, 0.030 * S);
-        thumb.rotation.z = side * 1.05;
-        thumb.rotation.x = -0.35;
-        arm.hand.add(thumb);
-        arm.hand.add(chip(0.075 * S, 0.011 * S, 0.016 * S, m.trim, 0, -0.108 * S, 0.050 * S, 0.3));
-        arm.fingers = fing;
+        arm.hand.position.y = -foL - 0.018 * S;
+        buildHand(rig, arm, side, m, S * (0.94 + B.arm * 0.06));
       }
     }
 
@@ -23659,43 +23658,51 @@ const Sculpt = {
       strip(leg.kn, keep);
       strip(leg.ft, keep);
 
-      const thR = 0.098 * S * (heavy ? 1.2 : 1);
-      const knR = 0.072 * S * (heavy ? 1.16 : 1);
-      leg.hip.add(ball(thR * 1.18, m.suit, 0, 0.94));
-      leg.hip.add(limbGeo(thR, knR, 0.44 * S, m.suit));
-      // Thigh seam, so trousers read as trousers.
-      leg.hip.add(chip(0.012 * S, 0.36 * S, 0.012 * S, m.dark, side * thR * 0.9, -0.22 * S, 0.02 * S, 0.3));
+      leg.hip.position.set(side * 0.118 * S0 * B.waist, -0.06 * S, 0);
+      const thR = 0.096 * S * B.leg;
+      const knR = 0.070 * S * B.leg;
+      const anR = 0.052 * S * B.leg;
+      const thL = 0.43 * S, cfL = 0.39 * S;
+      leg.kn.position.y = -thL;
+      leg.ft.position.y = -cfL;
 
-      leg.kn.add(ball(knR * 1.14, m.suit, 0, 0.95));
-      // Knee pad, revolved so it wraps rather than sitting on top like a tile.
+      const TH = [
+        [0.0001, 0.108 * S],
+        [thR * 0.96, 0.070 * S],
+        [thR * 1.14, 0.010 * S],
+        [thR * 1.06, -thL * 0.34],
+        [knR * 1.22, -thL * 0.80],
+        [knR * 1.06, -thL],
+        [knR * 0.94, -thL - 0.02 * S]
+      ];
+      leg.hip.add(lathe(TH, m.suit, { squash: SQL, seg: LSEG }));
+      // Outseam, in the gap between thigh and any plate: a dark line that
+      // gives the leg a front and a side.
+      leg.hip.add(chip(0.010 * S, 0.34 * S, 0.010 * S, m.dark,
+        side * (thR * 1.06 + 0.004 * S), -thL * 0.42, 0.02 * S, 0.3));
+
+      /* Calf lives in the shin profile as a back-heavy bulge rather than a
+         separate blob hung off the rear. */
+      const CF = [
+        [0.0001, 0.076 * S],
+        [knR * 1.10, 0.036 * S],
+        [knR * 1.16, -0.020 * S],
+        [knR * 1.06, -cfL * 0.30],
+        [anR * 1.30, -cfL * 0.66],
+        [anR * 1.04, -cfL],
+        [anR * 0.90, -cfL - 0.018 * S]
+      ];
+      leg.kn.add(lathe(CF, m.suit, { squash: SQL, seg: LSEG }));
       leg.kn.add(lathe([
-        [knR * 1.02, 0.045 * S], [knR * 1.22, -0.02 * S], [knR * 1.16, -0.09 * S]
-      ], m.armor, { squash: 0.92 }));
-      leg.kn.add(limbGeo(knR, 0.052 * S, 0.40 * S, m.suit));
+        [knR * 0.80, -cfL * 0.16], [knR * 1.02, -cfL * 0.36], [knR * 0.72, -cfL * 0.60]
+      ], m.suit, { squash: 0.70, pos: [0, 0, -knR * 0.42] }));
+      // Kneepad: one plate clearance over the knee bend of the shin.
+      leg.kn.add(lathe(grow(CF.slice(1, 4), PLATE), m.armor, { squash: SQL, seg: LSEG }));
 
-      // Boot: a flared cuff, a rounded foot mass, a sole and a toe cap. The
-      // flare is what makes the leg silhouette stop being a stick.
-      leg.ft.add(lathe([
-        [0.052 * S, 0.10 * S], [0.082 * S, 0.055 * S], [0.086 * S, -0.02 * S], [0.072 * S, -0.075 * S]
-      ], m.dark, { squash: 0.94 }));
-      const foot = soft(0.115 * S, 0.078 * S, 0.24 * S, m.dark, 0, -0.075 * S, 0.055 * S, 0.44);
-      leg.ft.add(foot);
-      leg.ft.add(soft(0.126 * S, 0.030 * S, 0.275 * S, m.armor, 0, -0.108 * S, 0.058 * S, 0.35));
-      leg.ft.add(taper(0.105 * S, 0.082 * S, 0.062 * S, 0.09 * S, m.armor, 0, -0.062 * S, 0.165 * S));
-      leg.ft.add(chip(0.080 * S, 0.010 * S, 0.016 * S, m.trim, 0, -0.030 * S, 0.126 * S, 0.3));
+      buildBoot(leg.ft, m, S * (0.94 + B.leg * 0.06));
     }
 
-    /* --- coat ------------------------------------------------------------
-       BipedRig builds the coat groups; this replaces their contents with a
-       shaped panel and adds the side flaps that give it a back and two sides
-       instead of one slab. */
-    /* BipedRig builds a three-segment coat whenever `cfg.coat` is set, and
-       `makeHexis` sets it. Those panels are chest-parented, full body width
-       and reach the ankles — with the jacket above them the result is a
-       barrel with a head on top. Hexis wears a JACKET; per the Part One lore
-       it is "dark blue, almost black", not a duster. So a rig that has the
-       jacket loses the long coat, and only the archetypes that were designed
-       around one keep it. */
+    /* --- long coat ------------------------------------------------------ */
     const longCoat = !!cfg.coat && cfg.jacket === false;
     if (rig.coat && rig.coat.length && !longCoat) {
       for (const c of rig.coat) c.g.visible = false;
@@ -23708,11 +23715,11 @@ const Sculpt = {
         strip(grp, keep);
         grp.add(taper(w[i] * S, w[i] * 0.86 * S, h[i] * S, 0.085 * S, m.cloth,
           0, -h[i] * S / 2, -0.01 * S));
-        for (const side of [-1, 1]) {
+        for (const sd of [-1, 1]) {
           const f = taper(w[i] * 0.44 * S, w[i] * 0.30 * S, h[i] * 0.94 * S, 0.07 * S, m.cloth,
-            side * w[i] * 0.47 * S, -h[i] * 0.48 * S, 0.012 * S);
-          f.rotation.y = side * 0.55;
-          f.rotation.z = side * -0.06;
+            sd * w[i] * 0.47 * S, -h[i] * 0.48 * S, 0.012 * S);
+          f.rotation.y = sd * 0.55;
+          f.rotation.z = sd * -0.06;
           grp.add(f);
         }
         if (i === rig.coat.length - 1) {
@@ -23728,7 +23735,7 @@ const Sculpt = {
     /* --- back unit ------------------------------------------------------ */
     if (cfg.pauldron || cfg.face) {
       const pack = new THREE.Group();
-      pack.position.set(0, 0.36 * S, -0.17 * S);
+      pack.position.set(0, 0.36 * S, -chR * 0.82);
       pack.add(soft(0.30 * S, 0.28 * S, 0.10 * S, m.armor, 0, 0, 0, 0.4));
       pack.add(chip(0.34 * S, 0.045 * S, 0.12 * S, m.dark, 0, 0.15 * S, 0, 0.4));
       const cores = [];
@@ -23755,30 +23762,391 @@ const Sculpt = {
       rig.ventCores = cores;
     }
 
-    /* --- rank chevrons -------------------------------------------------
-       Coloured by tier, so in a crowd of nine you can see which two are the
-       Brutes before they wind up. Built here rather than in a later hook so
-       they merge with the rest of the trim instead of costing a draw call
-       each. */
-    if (rig.__tier > 0 && j.chest) {
-      for (let i = 0; i < Math.min(4, rig.__tier); i++) {
-        j.chest.add(chip((0.16 - i * 0.018) * S, 0.020 * S, 0.026 * S, m.trim,
-          0, (0.52 - i * 0.042) * S, 0.152 * S, 0.3));
-      }
+    /* Per-archetype gear runs last, so it can measure the body it is going
+       onto. 355-silhouette.js registers into this. */
+    for (const fn of Sculpt.gear) {
+      try { fn(rig, { S, B, m, j, cfg, keep, lathe, ball, soft, chip, limbGeo, taper, plate }); }
+      catch (e) { console.error('[model] gear', e); }
     }
 
-    /* 60-upgrade.js adds its own fingers, boot caps and chest vents on the
-       rig's first update, positioned for the old boxy proportions — on top of
-       the hands, boots and back unit built above. It skips any part already
-       flagged `detailed`, so flagging them here suppresses the duplicate
-       geometry while still letting that pass set `_detailed`, which is what
-       80-perf's merge is gated on. Clearing the flag instead would cost the
-       merge and every draw call it saves. */
     for (const arm of [rig.armL, rig.armR]) if (arm && arm.hand) arm.hand.userData.detailed = true;
     for (const leg of [rig.legL, rig.legR]) if (leg && leg.ft) leg.ft.userData.detailed = true;
     if (j.chest) j.chest.userData.detailed = true;
 
     Sculpt.built++;
+  }
+
+  /* --- the face --------------------------------------------------------- */
+  /* --- the face ---------------------------------------------------------
+     Every feature is placed against the skull's ACTUAL surface at its own
+     height, read back out of the profile the head was lathed from. v4 used
+     the equator radius for everything, so the eyes, brows and mouth all sat
+     on one flat plane hanging in front of a round head — which is why the
+     face shimmered and read as a mask rather than a face. */
+  function buildFace(rig, j, m, S, H, cfg) {
+    const skin = rig.faceSkin || m.dark;
+    const SK = rig.__skull;
+
+    // Skull half-width at a world-local height y, in x and in z.
+    function surf(y) {
+      const yl = (y - SK.y);
+      const p = SK.p;
+      if (yl <= p[0][1]) return 0;
+      for (let i = 1; i < p.length; i++) {
+        if (yl <= p[i][1]) {
+          const t = (yl - p[i - 1][1]) / (p[i][1] - p[i - 1][1] || 1);
+          return p[i - 1][0] + (p[i][0] - p[i - 1][0]) * t;
+        }
+      }
+      return 0;
+    }
+    const sx = (y) => surf(y) * SK.sx;
+    const sz = (y) => surf(y) * SK.sz;
+
+    const U = S * H;                       // one head unit
+    const browY = SK.y + 0.062 * U;
+    const eyeY = SK.y + 0.036 * U;
+    const noseY = SK.y - 0.004 * U;
+    const mouthY = SK.y - 0.062 * U;
+    const chinY = SK.y - 0.104 * U;
+
+    /* Chin and jaw are MASS added to the lower skull, sharing its centre, so
+       they blend instead of sitting on it. A taper laid across the jaw — what
+       v4 did — flattens the whole lower face into a slab, because taper()
+       scales its own bevel away along X. */
+    const FS = Sculpt.faceSeg;
+    const chin = ball(0.050 * U, skin, 0, 1, FS);
+    chin.scale.set(0.96, 0.74, 0.92);
+    chin.position.set(0, chinY + 0.014 * U, sz(chinY) * 0.26);
+    j.head.add(chin);
+
+    for (const side of [-1, 1]) {
+      /* These are MASS, not features: each one has to sit far enough inside
+         the skull that only a swell of it clears the surface. v6 pushed them
+         out to 0.6 of the local half-width and every one read as a separate
+         pebble glued to the face. */
+      const jw = ball(0.056 * U, skin, 0, 1, FS);
+      jw.scale.set(0.66, 0.80, 0.94);
+      jw.position.set(side * sx(mouthY) * 0.44, mouthY - 0.012 * U, sz(mouthY) * 0.06);
+      j.head.add(jw);
+
+      const ck = ball(0.042 * U, skin, 0, 1, FS);
+      ck.scale.set(0.94, 0.66, 0.72);
+      ck.position.set(side * sx(eyeY) * 0.44, eyeY - 0.034 * U, sz(eyeY) * 0.44);
+      j.head.add(ck);
+
+      // Brow ridge: a swell over the eye, not a bar in front of it.
+      const br = ball(0.048 * U, skin, 0, 1, FS);
+      br.scale.set(0.98, 0.40, 0.60);
+      br.position.set(side * sx(browY) * 0.34, browY - 0.004 * U, sz(browY) * 0.48);
+      j.head.add(br);
+    }
+
+    // Nose: a bridge running down off the brow, then a tip.
+    const bridge = ball(0.024 * U, skin, 0, 1, FS);
+    bridge.scale.set(0.58, 2.05, 1.00);
+    bridge.position.set(0, (browY + noseY) / 2, sz(noseY) * 0.74);
+    j.head.add(bridge);
+    const tip = ball(0.018 * U, skin, 0, 1, FS);
+    tip.scale.set(1.14, 0.86, 1.08);
+    tip.position.set(0, noseY - 0.008 * U, sz(noseY) * 0.86);
+    j.head.add(tip);
+
+    for (const side of [-1, 1]) {
+      const ear = ball(0.032 * U, skin, 0, 1, FS);
+      ear.scale.set(0.32, 1.18, 0.82);
+      ear.position.set(side * sx(eyeY) * 0.94, eyeY - 0.014 * U, -0.012 * U);
+      ear.rotation.z = side * -0.10;
+      j.head.add(ear);
+    }
+
+    const white = rig.eyeWhite || (rig.eyeWhite = new THREE.MeshStandardMaterial({
+      color: '#eef4fb', roughness: 0.22, metalness: 0
+    }));
+    const iris = rig.eyeIris || (rig.eyeIris = new THREE.MeshBasicMaterial({
+      color: cfg.eye || cfg.trim || '#5FE3FF', fog: false
+    }));
+    const eyeR = 0.031 * U;
+    const eyeX = sx(eyeY) * 0.50;
+    // Set the ball INTO the head: only the front cap of it clears the skin.
+    const eyeZ = sz(eyeY) * 0.80 - eyeR * 0.30;
+    rig.eyes = [];
+    rig.lids = [];
+    for (const side of [-1, 1]) {
+      const e = ball(eyeR, white, 0, 1, FS);
+      e.scale.set(1.14, 0.84, 0.66);
+      e.position.set(side * eyeX, eyeY, eyeZ);
+      j.head.add(e);
+
+      /* Iris as a shallow ball nested just proud of the white, not a flat
+         disc floating at the equator. A disc on a sphere at 2mm is the single
+         worst z-fight in the whole rig and it lands on the character's eyes. */
+      const ir = ball(eyeR * 0.56, iris, 0, 1, FS);
+      ir.scale.set(1.0, 1.0, 0.46);
+      ir.position.set(side * eyeX, eyeY, eyeZ + eyeR * 0.62);
+      j.head.add(ir);
+      rig.eyes.push(ir);
+
+      const lid = ball(eyeR * 1.06, skin, 0, 1, FS);
+      lid.scale.set(1.20, 0.46, 0.80);
+      lid.position.set(side * eyeX, eyeY + eyeR * 0.68, eyeZ - eyeR * 0.10);
+      j.head.add(lid);
+      rig.lids.push(lid);
+    }
+
+    rig.brows = [];
+    for (const side of [-1, 1]) {
+      const b2 = ball(0.030 * U, rig.faceHair || m.dark, 0, 1, FS);
+      b2.scale.set(1.55, 0.34, 0.52);
+      b2.position.set(side * eyeX, eyeY + eyeR * 1.28, sz(browY) * 0.80);
+      b2.rotation.z = side * -0.16;
+      j.head.add(b2);
+      rig.brows.push(b2);
+    }
+
+    // Mouth: an upper and a lower lip with a line between them, laid on the
+    // skull's surface at mouth height rather than at the equator.
+    const lipMat = rig.faceLip || (rig.faceLip = new THREE.MeshStandardMaterial({
+      color: cfg.lip || '#a3675c', roughness: 0.62, metalness: 0
+    }));
+    const mz = sz(mouthY) * 0.90;
+    const upper = ball(0.021 * U, lipMat, 0, 1, FS);
+    upper.scale.set(1.95, 0.38, 0.54);
+    upper.position.set(0, mouthY + 0.008 * U, mz);
+    j.head.add(upper);
+    const lower = ball(0.020 * U, lipMat, 0, 1, FS);
+    lower.scale.set(1.70, 0.44, 0.54);
+    lower.position.set(0, mouthY - 0.008 * U, mz);
+    j.head.add(lower);
+    const line = ball(0.019 * U, rig.faceMouth || m.dark, 0, 1, FS);
+    line.scale.set(2.05, 0.15, 0.44);
+    line.position.set(0, mouthY, mz + 0.004 * U);
+    j.head.add(line);
+
+    if (cfg.mask) {
+      const mask = lathe([
+        [sx(mouthY - 0.03 * U) + 0.008 * U, mouthY - 0.034 * U],
+        [sx(mouthY) + 0.010 * U, mouthY],
+        [sx(noseY) + 0.008 * U, noseY + 0.014 * U]
+      ], rig.faceMask || m.armor, { squash: SK.sz, phiStart: -0.66, phiLength: 1.32 });
+      mask.material = twoSided(rig.faceMask || m.armor);
+      j.head.add(mask);
+    }
+
+    if (cfg.hair !== false) buildHair(rig, j, m, S, H, cfg);
+  }
+
+  /* --- hair -------------------------------------------------------------
+     A cap that clears the skull by a real thickness at every height, plus a
+     fringe that HANGS. A taper is built along its own +Y, so a strand meant
+     to fall over the brow has to be rotated most of the way over; a small
+     negative tilt leaves it jutting forward like a visor. */
+  function buildHair(rig, j, m, S, H, cfg) {
+    const hairA = rig.faceHair || m.dark;
+    const hairB = rig.faceHairLit || hairA;
+    const SK = rig.__skull, U = S * H, T = 0.012 * U;
+    const p = SK.p;
+    const sq = SK.sz / SK.sx;
+    // Skull half-width at a skull-local height.
+    const r = (yl) => {
+      for (let i = 1; i < p.length; i++)
+        if (yl <= p[i][1]) {
+          const t = (yl - p[i - 1][1]) / (p[i][1] - p[i - 1][1] || 1);
+          return p[i - 1][0] + (p[i][0] - p[i - 1][0]) * t;
+        }
+      return 0.0001;
+    };
+
+    /* A hairline, which v5 did not have: the cap starts ABOVE the brow, so it
+       cannot swallow the eyes. The previous cut started at the temple line and
+       the whole upper face disappeared under it, with the brow and cheek
+       masses poking back out through the fringe as pale hexagons. */
+    const HL = 0.072 * U;                          // hairline height, skull-local
+    const cap = [];
+    for (let yl = HL; yl <= 0.140 * U; yl += 0.022 * U) cap.push([r(yl) + T, SK.y + yl]);
+    cap.push([r(0.150 * U) * 0.55 + T, SK.y + 0.150 * U]);
+    cap.push([0.0001, SK.y + 0.156 * U + T]);
+    j.head.add(lathe(cap, hairA, { squash: sq }));
+
+    /* The back and sides carry on down past the hairline — hair does not stop
+       level all the way round. A partial lathe centred on -Z, so the face
+       stays clear. */
+    const back = [];
+    for (let yl = -0.052 * U; yl <= HL + 0.004 * U; yl += 0.024 * U)
+      back.push([r(yl) + T, SK.y + yl]);
+    const bk = lathe(back, hairA, {
+      squash: sq, phiStart: Math.PI - 1.30, phiLength: 2.60
+    });
+    bk.material = twoSided(hairA);
+    j.head.add(bk);
+
+    /* Fringe. A taper is built along its own +Y, so a strand that should fall
+       over the brow has to be rotated most of the way over — anything short of
+       ~2.8 rad leaves it jutting out of the crown like a horn, which is what
+       v5 shipped. Everything here hangs from the hairline forward edge. */
+    const topY = SK.y + HL, frontZ = r(HL) * SK.sz;
+    const styles = {
+      /* taper() is built ROOT-DOWN — it already hangs at zero rotation. Every
+         version up to v8 pitched the fringe by ~2.9 rad "so it would hang",
+         which flipped each strand up out of the crown; the character shipped
+         with a mohawk of horns and a bald forehead for four rounds. Positive
+         pitch swings the tip backwards, so a fringe leaning over the brow is
+         a small NEGATIVE number. */
+      // x, y-from-hairline, z-from-front, halfWidth, length, rollZ, pitchX, lit
+      /* Strands are wider than their spacing on purpose: at 0.058 wide on a
+         0.046 pitch they stood apart as separate blades and the fringe read
+         as a row of spikes. Overlapping them makes one mass with cut edges,
+         which is what hair looks like at this level of stylisation. */
+      swept: [
+        [0.000, 0.030, 0.004, 0.082, 0.090, 0.00, -0.30, 1],
+        [0.046, 0.028, 0.000, 0.070, 0.082, -0.16, -0.26, 1],
+        [-0.046, 0.028, 0.000, 0.070, 0.082, 0.16, -0.26, 0],
+        [0.080, 0.020, -0.016, 0.058, 0.070, -0.30, -0.18, 0],
+        [-0.080, 0.020, -0.016, 0.058, 0.070, 0.30, -0.18, 0],
+        [0.030, 0.048, -0.030, 0.066, 0.108, -0.08, -0.42, 1],
+        [-0.030, 0.048, -0.030, 0.066, 0.108, 0.08, -0.42, 0]
+      ],
+      crop: [
+        [0.000, 0.026, 0.002, 0.090, 0.050, 0.00, -0.22, 1],
+        [0.054, 0.022, -0.006, 0.072, 0.046, -0.14, -0.16, 0],
+        [-0.054, 0.022, -0.006, 0.072, 0.046, 0.14, -0.16, 0]
+      ],
+      long: [
+        [0.000, 0.026, 0.004, 0.092, 0.100, 0.00, -0.28, 1],
+        [0.050, 0.024, -0.002, 0.070, 0.092, -0.18, -0.22, 1],
+        [-0.050, 0.024, -0.002, 0.070, 0.092, 0.18, -0.22, 0],
+        [0.094, -0.030, -0.058, 0.046, 0.200, -0.26, 0.20, 0],
+        [-0.094, -0.030, -0.058, 0.046, 0.200, 0.26, 0.20, 0],
+        [0.000, -0.052, -0.134, 0.116, 0.195, 0.00, 0.11, 0]
+      ]
+    };
+    for (const [x, dy, z, w, h, rz, rx, lit] of (styles[cfg.hairStyle] || styles.swept)) {
+      const c = taper(w * U, w * 0.34 * U, h * U, w * 0.60 * U,
+        lit ? hairB : hairA, x * U, topY + dy * U, frontZ * 1.00 + z * U);
+      c.rotation.z = rz;
+      c.rotation.x = rx;
+      j.head.add(c);
+    }
+
+    /* Sideburns hug the side of the head and stop at the jaw. v4 hung them a
+       full half-width out at 3cm thick and they read as tusks. */
+    for (const side of [-1, 1]) {
+      const sb = taper(0.018 * U, 0.009 * U, 0.058 * U, 0.012 * U,
+        hairA, side * (r(0.010 * U) * 0.97), SK.y + 0.020 * U, -0.004 * U);
+      sb.rotation.x = 0.04;
+      sb.rotation.z = side * 0.05;
+      j.head.add(sb);
+    }
+  }
+
+  /* --- helmet -----------------------------------------------------------
+     Built off the same skull profile the bare head uses, one shell thickness
+     out, so a helmeted head and a bare head have the same silhouette weight
+     and the same neck join. v4's helmet used hard-coded heights tuned to an
+     older, larger skull and floated above it. */
+  function buildHelmet(rig, j, m, S, H, cfg) {
+    const SK = rig.__skull, U = S * H, p = SK.p, T = 0.014 * U;
+    const at = (i, k) => [p[i][0] * (k || 1) + T, SK.y + p[i][1]];
+    j.head.add(lathe([
+      [p[1][0] * 0.72 + T, SK.y + p[1][1] - 0.010 * U],
+      at(2), at(3), at(4), at(5), at(6),
+      [0.0001, SK.y + p[7][1] + T]
+    ], m.armor, { squash: SK.sz / SK.sx }));
+
+    const browY = SK.y + 0.052 * U, jawY = SK.y - 0.070 * U;
+    const rz = (y) => {
+      const yl = y - SK.y;
+      for (let i = 1; i < p.length; i++)
+        if (yl <= p[i][1]) {
+          const t = (yl - p[i - 1][1]) / (p[i][1] - p[i - 1][1] || 1);
+          return (p[i - 1][0] + (p[i][0] - p[i - 1][0]) * t) * SK.sz;
+        }
+      return 0;
+    };
+    // Visor: a recessed dark band with a lit strip standing proud inside it.
+    j.head.add(chip(0.126 * U, 0.062 * U, 0.040 * U, m.dark,
+      0, SK.y + 0.016 * U, rz(SK.y + 0.016 * U) * 0.80 + T, 0.45));
+    const v = chip(0.146 * U, 0.030 * U, 0.026 * U, m.trim,
+      0, SK.y + 0.022 * U, rz(SK.y + 0.022 * U) * 0.80 + T + 0.012 * U, 0.4);
+    j.head.add(v);
+    rig.visor = v;
+    // Breather, and a brow ridge so the front has a top edge.
+    j.head.add(chip(0.080 * U, 0.050 * U, 0.044 * U, m.dark,
+      0, jawY + 0.020 * U, rz(jawY + 0.020 * U) * 0.74 + T, 0.45));
+    const brow = chip(0.118 * U, 0.022 * U, 0.034 * U, m.armor,
+      0, browY, rz(browY) * 0.80 + T, 0.35);
+    brow.rotation.x = -0.22;
+    j.head.add(brow);
+  }
+
+  /* --- hands ------------------------------------------------------------
+     Four fingers and a thumb, with a curl joint. The previous version was one
+     block with two grooves cut into it, which at any distance under three
+     metres read as a four-prong fork rather than a hand. Fingers cost twelve
+     triangles each at this bevel and they merge into the palm's material, so
+     the whole hand is still one draw submission. */
+  function buildHand(rig, arm, side, m, S) {
+    const hw = 0.076 * S, hh = 0.112 * S, hd = 0.100 * S;
+    arm.hand.add(soft(hw * 2, hh, hd, m.dark, 0, -0.050 * S, 0.004 * S, 0.46));
+    arm.hand.add(chip(hw * 1.9, 0.022 * S, hd * 0.9, m.armor, 0, -0.008 * S, 0.012 * S, 0.4));
+    // Knuckle bar.
+    arm.hand.add(chip(hw * 1.8, 0.020 * S, 0.030 * S, m.armor, 0, -0.098 * S, 0.040 * S, 0.3));
+
+    const fingers = new THREE.Group();
+    fingers.position.set(0, -0.100 * S, 0.006 * S);
+    /* Two segments each, short and thick. The first version ran 0.052-0.060
+       per segment, which on a 1.8 m body is a 10 cm finger — the hand came
+       out as a set of claws. Real fingers are shorter than they feel, and a
+       stylised hand wants them shorter still. */
+    const len = [0.030, 0.035, 0.033, 0.027];
+    for (let i = 0; i < 4; i++) {
+      const fx = (-0.0345 + i * 0.023) * S;
+      const seg1 = chip(0.022 * S, len[i] * S, 0.028 * S, m.dark, fx, -len[i] * 0.5 * S, 0.004 * S, 0.44);
+      const knuckle = new THREE.Group();
+      knuckle.position.set(0, -len[i] * S, 0.002 * S);
+      const seg2 = chip(0.020 * S, len[i] * 0.78 * S, 0.026 * S, m.dark, fx, -len[i] * 0.39 * S, 0.007 * S, 0.44);
+      knuckle.add(seg2);
+      // A resting hand is never flat. A third of a curl at the second joint
+      // is what stops it reading as a rake.
+      knuckle.rotation.x = -0.42;
+      fingers.add(seg1, knuckle);
+    }
+    arm.hand.add(fingers);
+    arm.fingers = fingers;
+
+    const thumb = new THREE.Group();
+    thumb.position.set(side * 0.060 * S, -0.048 * S, 0.026 * S);
+    thumb.rotation.z = side * 0.95;
+    thumb.rotation.x = -0.42;
+    thumb.add(chip(0.026 * S, 0.048 * S, 0.028 * S, m.dark, 0, -0.024 * S, 0, 0.45));
+    const tip = chip(0.023 * S, 0.038 * S, 0.026 * S, m.dark, 0, -0.019 * S, 0.004 * S, 0.45);
+    const tg = new THREE.Group();
+    tg.position.y = -0.048 * S;
+    tg.rotation.x = -0.35;
+    tg.add(tip);
+    thumb.add(tg);
+    arm.hand.add(thumb);
+    arm.thumb = thumb;
+    arm.hand.add(chip(0.075 * S, 0.011 * S, 0.016 * S, m.trim, 0, -0.086 * S, 0.048 * S, 0.3));
+  }
+
+  /* --- boots ------------------------------------------------------------ */
+  function buildBoot(ft, m, S) {
+    ft.add(lathe([
+      [0.052 * S, 0.10 * S], [0.086 * S, 0.055 * S], [0.090 * S, -0.02 * S], [0.074 * S, -0.075 * S]
+    ], m.dark, { squash: 0.94 }));
+    ft.add(soft(0.115 * S, 0.078 * S, 0.24 * S, m.dark, 0, -0.075 * S, 0.055 * S, 0.44));
+    ft.add(soft(0.126 * S, 0.030 * S, 0.275 * S, m.armor, 0, -0.108 * S, 0.058 * S, 0.35));
+    // Tread: four bars under the sole. Only ever seen mid-jump, and exactly
+    // then it is the thing the camera is pointed at.
+    for (let i = 0; i < 4; i++)
+      ft.add(chip(0.118 * S, 0.012 * S, 0.030 * S, m.dark, 0, -0.122 * S, (-0.03 + i * 0.055) * S, 0.2));
+    ft.add(taper(0.105 * S, 0.082 * S, 0.062 * S, 0.09 * S, m.armor, 0, -0.062 * S, 0.165 * S));
+    // Tongue and two lace bars.
+    ft.add(chip(0.070 * S, 0.075 * S, 0.030 * S, m.cloth || m.dark, 0, -0.030 * S, 0.112 * S, 0.35));
+    for (let i = 0; i < 2; i++)
+      ft.add(chip(0.082 * S, 0.010 * S, 0.014 * S, m.trim, 0, (-0.012 - i * 0.030) * S, 0.122 * S, 0.3));
+    ft.add(chip(0.080 * S, 0.010 * S, 0.016 * S, m.trim, 0, -0.030 * S, 0.126 * S, 0.3));
   }
 
   /* ======================================================================
@@ -23928,15 +24296,34 @@ const Sculpt = {
       }
       // A blink. Two frames every few seconds, and its absence is the reason
       // a stylised face reads as a mannequin.
-      if (this.eyes && this.eyes.length) {
+      if (this.lids && this.lids.length) {
         this.blinkT = (this.blinkT === undefined ? Math.random() * 4 : this.blinkT) - d;
         if (this.blinkT <= 0) {
           this.blinkT = 2.4 + Math.random() * 4.5;
           this.blinkK = 1;
         }
         this.blinkK = Math.max(0, (this.blinkK || 0) - d * 9);
-        const open = 1 - Math.sin(clamp(this.blinkK, 0, 1) * Math.PI);
-        for (const e of this.eyes) e.scale.y = Math.max(0.05, open);
+        const shut = Math.sin(clamp(this.blinkK, 0, 1) * Math.PI);
+        // The lid slides down over the eye rather than the eye shrinking —
+        // scaling the eyeball is the tell that gives away a fake blink.
+        for (const l of this.lids) {
+          if (l.__y0 === undefined) l.__y0 = l.position.y;
+          l.position.y = l.__y0 - shut * (l.__y0 * 0.0 + 0.030 * this.S);
+          l.scale.y = 0.40 + shut * 0.85;
+        }
+      }
+      // Brows drop and pull in on an attack. Two rotations, and it is the
+      // difference between a face and a mask.
+      if (this.brows && this.brows.length) {
+        const angry = (st.atk >= 0 || st.punch >= 0) ? 1 : 0;
+        this.browK = damp(this.browK || 0, angry, 9, d);
+        for (let i = 0; i < this.brows.length; i++) {
+          const side = i === 0 ? -1 : 1;
+          const b = this.brows[i];
+          if (b.__z0 === undefined) { b.__z0 = b.rotation.z; b.__y0 = b.position.y; }
+          b.rotation.z = b.__z0 + side * -0.34 * this.browK;
+          b.position.y = b.__y0 - 0.012 * this.S * this.browK;
+        }
       }
       // Fists close on a punch.
       const punchAmt = st.punch >= 0 ? clamp(st.punch / 0.48, 0, 1) : 0;
@@ -24010,6 +24397,405 @@ const Sculpt = {
   });
 
   console.log('[hexis 3.1] model online:', done.join(', '));
+})();
+
+/* ===== 355-silhouette.js ==================================================
+   HEXIS 3.2 — one body per archetype, not one body in ten colours.
+
+   THE PROBLEM, MEASURED BY LOOKING AT IT
+
+   Lined the whole cast up on a stage and photographed it. A Grunt, an
+   Enforcer, a Warden, a Brute, a Lancer and a Stalker were the same
+   silhouette at six different hues. In a fight that means you cannot tell
+   what is about to hit you until it is already winding up, which makes the
+   telegraph — the thing this game's whole combat design rests on — useless
+   at any range beyond about eight metres.
+
+   THE FIX, IN TWO HALVES
+
+   Half one is in 350-model.js: every dimension the body is built from is a
+   multiplier now, and each archetype gets a build profile. A Brute is not a
+   Grunt with a bigger scale — it is 34% taller, 58% broader at the shoulder,
+   with 42% thicker arms, an 18% longer reach, a head 30% SMALLER against its
+   own body, almost no neck, a lower hip and a forward hunch. Shrink one to
+   the other's height and they are still obviously different animals.
+
+   Half two is this file: the signature gear. One silhouette-defining object
+   each, big enough to read as a shape rather than as detail.
+
+     Grunt     nothing. It is the ruler everything else is measured against.
+     Enforcer  riot helm and a chest rig
+     Swarmer   twin arm blades, forward pitch
+     Lancer    a rifle longer than its own torso, and a spotting scope
+     Warden    a tower shield, taller than its head
+     Brute     slab pauldrons, a jaw cage, and knuckle plates
+     Stalker   hood, half-cape, and a wrist blade
+     Kell      crowned helm, cape, and the cannon arm
+     Rex       the long shimmering coat and a collar
+
+   All of it goes on before 80-perf merges, so a helmet is not a draw call.
+   ========================================================================= */
+
+(function silhouettePass() {
+  const g = window.HEXIS;
+  if (!g) return;
+  const done = [];
+  const step = (n, fn) => { try { fn(); done.push(n); } catch (e) { console.error('[silo] ' + n, e); } };
+
+  /* Which build each thing uses. This is the table that does most of the
+     work; the gear below is the flourish on top of it. */
+  const BUILD_OF = {
+    grunt: 'soldier', enforcer: 'heavy', swarmer: 'runner', sniper: 'lean',
+    warden: 'tank', brute: 'titan', stalker: 'shade'
+  };
+  const HAIR_OF = { grunt: 'crop', enforcer: 'crop', swarmer: 'crop', sniper: 'swept', stalker: 'long' };
+
+  step('builds', () => {
+    /* Stamped inside the factory rather than on the spawn event.
+
+       The first version listened for `enemy:spawned`, which is emitted by the
+       Foe constructor — so anything that builds an archetype rig WITHOUT
+       constructing a Foe got no build at all and came out as the default
+       body. That is every rig in the model viewer, the boss minions, and any
+       future cutscene extra. Tag it where the rig is made and there is one
+       path instead of several. */
+    if (typeof makeArchetypeRig === 'function') {
+      const base = makeArchetypeRig;
+      makeArchetypeRig = function (kind) {
+        const rig = base(kind);
+        if (rig && rig.cfg) {
+          const def = (typeof ENEMY_DEFS !== 'undefined' && ENEMY_DEFS[kind]) || null;
+          rig.cfg.kind = kind;
+          rig.cfg.build = BUILD_OF[kind] || 'soldier';
+          rig.cfg.hairStyle = HAIR_OF[kind] || 'crop';
+          rig.cfg.heavy = !!def && (def.tier >= 4 || kind === 'warden');
+          rig.__tier = def ? def.tier : 1;
+          if (kind === 'stalker') { rig.cfg.hood = true; rig.cfg.jacket = false; rig.cfg.coat = true; }
+          if (kind === 'brute' || kind === 'warden') { rig.cfg.jacket = false; rig.cfg.coat = true; }
+        }
+        return rig;
+      };
+    }
+    // The Act I Enemy predates the archetype table.
+    Hook.before(Enemy.prototype, 'update', function () {
+      // Not every Enemy carries a full BipedRig — the crowd and the Act I
+      // simple foes hand over a bare group with no cfg at all.
+      if (this.rig && this.rig.cfg && !this.rig.cfg.build) {
+        this.rig.cfg.build = this.enf ? 'heavy' : 'soldier';
+        this.rig.cfg.kind = this.enf ? 'enforcer' : 'grunt';
+      }
+    }, 'silo32:baseBuild');
+
+    if (g.rig) { g.rig.cfg.build = 'hero'; g.rig.cfg.kind = 'hexis'; g.rig.cfg.hairStyle = 'swept'; }
+
+    // Kell and Rex are rebound in 370-lore; tag them through the same door.
+    if (typeof makeKell === 'function') {
+      const base = makeKell;
+      makeKell = function () {
+        const r = base();
+        r.cfg.build = 'kell'; r.cfg.kind = 'kell';
+        return r;
+      };
+    }
+    if (typeof makeMentor === 'function') {
+      const base = makeMentor;
+      makeMentor = function () {
+        const r = base();
+        r.cfg.build = 'mentor'; r.cfg.kind = 'rex'; r.cfg.hairStyle = 'swept';
+        return r;
+      };
+    }
+    if (typeof makeCivilian === 'function') {
+      const base = makeCivilian;
+      makeCivilian = function (o) {
+        const r = base(o);
+        r.cfg.build = 'civ'; r.cfg.kind = 'civ';
+        r.cfg.hairStyle = RND.pick(['crop', 'swept', 'long']);
+        return r;
+      };
+    }
+  });
+
+  /* ---------------------------------------------------------------- GEAR */
+  step('gear', () => {
+    Sculpt.gear.push((rig, P) => {
+      const { S, B, m, j, cfg, lathe, ball, soft, chip, taper } = P;
+      const kind = cfg.kind;
+      if (!kind) return;
+
+      /* Head gear was authored against the old skull: centre at 0.20*S, head
+         scale 1.30. 350's v5 pass moved the skull down and shrank it out of
+         bobblehead territory, so rather than re-tune seventeen hard-coded
+         heights, everything head-mounted goes into one group that carries the
+         old frame and is scaled and dropped onto the new skull. Anything
+         authored later can use `hg` and the same numbers. */
+      const SK = rig.__skull;
+      const HSC = SK ? SK.p[3][0] / (0.108 * S * 1.30) : 1;
+      const hg = new THREE.Group();
+      hg.scale.setScalar(HSC);
+      hg.position.y = (SK ? SK.y : 0.20 * S) - 0.20 * S * HSC;
+      if (j.head) j.head.add(hg);
+      const head = { add: (o) => hg.add(o) };
+
+      /* ---------------------------------------------------------- ENFORCER
+         A riot helm with a face grille and a chest rig. Reads as "police
+         line" from across the street, which is what it is. */
+      if (kind === 'enforcer') {
+        const hr = 0.135 * S;
+        head.add(lathe([
+          [0.0001, 0.335 * S], [hr * 0.56, 0.318 * S], [hr * 0.92, 0.262 * S],
+          [hr, 0.190 * S], [hr * 0.94, 0.128 * S], [hr * 0.74, 0.096 * S]
+        ], m.armor, { squash: 0.98 }));
+        // Brow ridge and a stubby crest, so the helm has a front.
+        head.add(chip(hr * 1.5, 0.030 * S, 0.055 * S, m.armor, 0, 0.246 * S, hr * 0.72, 0.35));
+        head.add(taper(0.032 * S, 0.012 * S, 0.13 * S, 0.07 * S, m.armor, 0, 0.322 * S, -0.01 * S));
+        for (let i = 0; i < 4; i++)
+          head.add(chip(0.11 * S, 0.008 * S, 0.016 * S, m.dark, 0, (0.150 + i * 0.020) * S, hr * 0.80, 0.2));
+        // Chest rig: two pouches and a strap.
+        j.chest.add(chip(0.30 * S, 0.030 * S, 0.03 * S, m.dark, 0, 0.30 * S, 0.20 * S, 0.3));
+        for (const side of [-1, 1])
+          j.chest.add(soft(0.085 * S, 0.10 * S, 0.055 * S, m.dark, side * 0.13 * S, 0.26 * S, 0.19 * S, 0.4));
+      }
+
+      /* ------------------------------------------------------------ SWARMER
+         Twin arm blades and a beak visor. Small, fast, and it should look
+         like it wants to be closer than you do. */
+      if (kind === 'swarmer') {
+        for (const arm of [rig.armL, rig.armR]) {
+          if (!arm || !arm.el) continue;
+          const bl = taper(0.030 * S, 0.006 * S, 0.34 * S, 0.055 * S, m.trim,
+            0, -0.34 * S, -0.05 * S);
+          bl.rotation.x = 0.22;
+          arm.el.add(bl);
+        }
+        head.add(taper(0.075 * S, 0.020 * S, 0.10 * S, 0.06 * S, m.armor, 0, 0.196 * S, 0.13 * S));
+      }
+
+      /* ------------------------------------------------------------- LANCER
+         A rifle longer than its own torso. This is the whole design: you
+         should be able to see the barrel before you can see the man. */
+      if (kind === 'sniper') {
+        const arm = rig.armR;
+        if (arm && arm.hand) {
+          const gun = new THREE.Group();
+          gun.rotation.x = Math.PI / 2;
+          gun.position.set(0, -0.10 * S, 0.02 * S);
+          // Receiver, barrel, coil stack, muzzle, stock.
+          gun.add(soft(0.055 * S, 0.075 * S, 0.34 * S, m.armor, 0, 0, 0.10 * S, 0.35));
+          gun.add(lathe([
+            [0.020 * S, 0.0], [0.024 * S, 0.30 * S], [0.019 * S, 0.86 * S]
+          ], m.dark, { rot: [-Math.PI / 2, 0, 0], pos: [0, 0, 0.16 * S], seg: 8 }));
+          for (let i = 0; i < 4; i++) {
+            const c = new THREE.Mesh(new THREE.TorusGeometry(0.036 * S, 0.010 * S, 4, 10), m.trim);
+            c.position.set(0, 0, (0.34 + i * 0.13) * S);
+            gun.add(c);
+          }
+          gun.add(taper(0.048 * S, 0.022 * S, 0.10 * S, 0.048 * S, m.trim, 0, 0, 0.98 * S));
+          gun.add(soft(0.045 * S, 0.090 * S, 0.16 * S, m.dark, 0, -0.02 * S, -0.14 * S, 0.4));
+          // Scope.
+          gun.add(lathe([
+            [0.022 * S, 0.0], [0.026 * S, 0.16 * S], [0.020 * S, 0.20 * S]
+          ], m.dark, { rot: [-Math.PI / 2, 0, 0], pos: [0, 0.055 * S, 0.08 * S], seg: 8 }));
+          arm.hand.add(gun);
+          rig.gun = gun;
+        }
+        // Tall spotting visor and a shoulder antenna.
+        head.add(chip(0.12 * S, 0.10 * S, 0.045 * S, m.dark, 0, 0.212 * S, 0.108 * S, 0.4));
+        head.add(chip(0.14 * S, 0.020 * S, 0.030 * S, m.trim, 0, 0.238 * S, 0.118 * S, 0.3));
+        if (rig.armL && rig.armL.sh)
+          rig.armL.sh.add(taper(0.016 * S, 0.005 * S, 0.34 * S, 0.016 * S, m.armor, -0.04 * S, 0.22 * S, -0.04 * S));
+      }
+
+      /* ------------------------------------------------------------- WARDEN
+         A tower shield taller than its own head, and a full helm with no
+         face at all. The design contract is "you cannot hit this from the
+         front", and the silhouette has to say so before the plate does. */
+      if (kind === 'warden') {
+        const arm = rig.armL;
+        if (arm && arm.hand) {
+          const sh = new THREE.Group();
+          sh.position.set(-0.14 * S, -0.02 * S, 0.16 * S);
+          sh.rotation.y = 0.12;
+          const face = soft(0.10 * S, 1.30 * S, 0.86 * S, m.armor, 0, 0.30 * S, 0, 0.18);
+          sh.add(face);
+          sh.add(soft(0.05 * S, 1.34 * S, 0.10 * S, m.trim, 0.055 * S, 0.30 * S, 0, 0.2));
+          for (let i = 0; i < 3; i++)
+            sh.add(chip(0.06 * S, 0.030 * S, 0.78 * S, m.dark, 0.055 * S, (-0.10 + i * 0.40) * S, 0, 0.2));
+          const boss = new THREE.Mesh(new THREE.CylinderGeometry(0.10 * S, 0.13 * S, 0.07 * S, 8), m.armor);
+          boss.rotation.z = Math.PI / 2;
+          boss.position.set(0.075 * S, 0.30 * S, 0);
+          sh.add(boss);
+          arm.hand.add(sh);
+          rig.shield = sh;
+          rig.shieldGlow = face;
+        }
+        const hr = 0.140 * S;
+        head.add(lathe([
+          [0.0001, 0.340 * S], [hr * 0.6, 0.322 * S], [hr, 0.250 * S],
+          [hr * 1.02, 0.170 * S], [hr * 0.90, 0.100 * S]
+        ], m.armor, { squash: 1.0 }));
+        head.add(chip(hr * 1.36, 0.030 * S, 0.040 * S, m.trim, 0, 0.212 * S, hr * 0.80, 0.3));
+        // Neck skirt, so there is no gap between helm and pauldron.
+        j.chest.add(lathe([
+          [0.15 * S, 0.60 * S], [0.21 * S, 0.52 * S], [0.20 * S, 0.46 * S]
+        ], m.armor, { squash: 0.9 }));
+      }
+
+      /* -------------------------------------------------------------- BRUTE
+         Slab pauldrons wider than its own hips, a jaw cage, knuckle plates,
+         and a back ridge. Nothing subtle: this is the one you run from. */
+      if (kind === 'brute') {
+        for (const side of [-1, 1]) {
+          const arm = side < 0 ? rig.armL : rig.armR;
+          if (!arm || !arm.sh) continue;
+          /* Slabs, not wings. The first cut revolved a 0.34 S radius plate
+             around the shoulder, which came out as a flat horizontal fan a
+             third of a metre wide — it read as a bird, not as armour. A
+             pauldron is a curved cap that hangs DOWN over the deltoid. */
+          const pd = lathe([
+            [0.085 * S, 0.13 * S], [0.20 * S, 0.075 * S], [0.235 * S, -0.02 * S], [0.215 * S, -0.14 * S]
+          ], m.armor, { squash: 0.88 });
+          pd.position.set(side * 0.035 * S, 0.02 * S, 0);
+          arm.sh.add(pd);
+          // Three overlapping lames down the outside, angled with the arm.
+          for (let i = 0; i < 3; i++) {
+            const lame = lathe([
+              [0.16 * S, 0.0], [0.225 * S - i * 0.012 * S, -0.03 * S], [0.20 * S - i * 0.012 * S, -0.06 * S]
+            ], m.armor, { squash: 0.88, pos: [side * 0.035 * S, (-0.09 - i * 0.075) * S, 0] });
+            arm.sh.add(lame);
+          }
+          arm.sh.add(chip(0.05 * S, 0.02 * S, 0.16 * S, m.trim, side * 0.16 * S, 0.055 * S, 0, 0.3));
+          if (arm.hand) {
+            arm.hand.add(chip(0.20 * S, 0.055 * S, 0.10 * S, m.armor, 0, -0.115 * S, 0.045 * S, 0.3));
+            for (let i = 0; i < 3; i++)
+              arm.hand.add(taper(0.030 * S, 0.008 * S, 0.075 * S, 0.030 * S, m.trim,
+                (-0.055 + i * 0.055) * S, -0.155 * S, 0.055 * S));
+          }
+        }
+        // Jaw cage: four bars across the mouth. Reads at forty metres.
+        for (let i = 0; i < 4; i++)
+          head.add(chip(0.012 * S, 0.10 * S, 0.012 * S, m.armor,
+            (-0.048 + i * 0.032) * S, 0.150 * S, 0.115 * S, 0.2));
+        head.add(chip(0.14 * S, 0.020 * S, 0.030 * S, m.armor, 0, 0.108 * S, 0.108 * S, 0.3));
+        // Back ridge.
+        for (let i = 0; i < 4; i++)
+          j.chest.add(taper(0.06 * S, 0.018 * S, 0.11 * S, 0.05 * S, m.armor,
+            0, (0.22 + i * 0.11) * S, -0.24 * S));
+      }
+
+      /* ------------------------------------------------------------ STALKER
+         A hood that hides the face and a half-cape off one shoulder. It
+         should read as a shape you are not sure about. */
+      if (kind === 'stalker') {
+        const cape = taper(0.34 * S, 0.20 * S, 0.86 * S, 0.06 * S, m.cloth,
+          -0.14 * S, 0.10 * S, -0.16 * S);
+        cape.rotation.z = 0.12;
+        cape.rotation.x = -0.06;
+        cape.material = Sculpt.twoSided(cape.material);
+        j.chest.add(cape);
+        if (rig.armL && rig.armL.sh) {
+          const clasp = new THREE.Mesh(new THREE.TorusGeometry(0.05 * S, 0.014 * S, 4, 10), m.trim);
+          clasp.rotation.y = Math.PI / 2;
+          clasp.position.set(-0.04 * S, 0.06 * S, 0);
+          rig.armL.sh.add(clasp);
+        }
+        const arm = rig.armR;
+        if (arm && arm.el) {
+          const bl = taper(0.026 * S, 0.006 * S, 0.40 * S, 0.045 * S, m.trim, 0, -0.36 * S, -0.06 * S);
+          bl.rotation.x = 0.14;
+          arm.el.add(bl);
+          rig.blade2 = bl;
+        }
+        // Under the hood, two lit eyes and nothing else.
+        head.add(chip(0.14 * S, 0.028 * S, 0.02 * S, m.trim, 0, 0.208 * S, 0.104 * S, 0.3));
+      }
+
+      /* --------------------------------------------------------------- KELL
+         "A suit of armour that looked ancient, covered in symbols that no
+         living human could translate." Seven feet, a crowned helm, a cape,
+         and the arm he was given. */
+      if (kind === 'kell') {
+        const hr = 0.150 * S;
+        head.add(lathe([
+          [0.0001, 0.352 * S], [hr * 0.52, 0.330 * S], [hr * 0.94, 0.268 * S],
+          [hr, 0.196 * S], [hr * 0.92, 0.124 * S], [hr * 0.70, 0.090 * S]
+        ], m.armor, { squash: 0.98 }));
+        // Crown: five horns, tallest at the centre. The one shape that says
+        // this is not a soldier.
+        for (let i = 0; i < 5; i++) {
+          const t = (i - 2) / 2;
+          const hgt = (0.30 - Math.abs(t) * 0.10) * S;
+          const horn = taper(0.045 * S, 0.010 * S, hgt, 0.045 * S, m.armor,
+            t * 0.10 * S, (0.34 + hgt * 0.4) * S, -0.02 * S);
+          horn.rotation.z = -t * 0.42;
+          horn.rotation.x = -0.18;
+          head.add(horn);
+        }
+        head.add(chip(0.20 * S, 0.036 * S, 0.040 * S, m.trim, 0, 0.212 * S, hr * 0.80, 0.3));
+        // Cape from both shoulders.
+        const cape = taper(0.62 * S, 0.44 * S, 1.05 * S, 0.07 * S, m.cloth,
+          0, 0.06 * S, -0.26 * S);
+        cape.material = Sculpt.twoSided(cape.material);
+        j.chest.add(cape);
+        // The cannon arm.
+        const arm = rig.armR;
+        if (arm && arm.el) {
+          const barrel = lathe([
+            [0.10 * S, 0.0], [0.13 * S, -0.16 * S], [0.14 * S, -0.34 * S], [0.11 * S, -0.42 * S]
+          ], m.armor, { squash: 1.0 });
+          arm.el.add(barrel);
+          for (let i = 0; i < 3; i++) {
+            const r = new THREE.Mesh(new THREE.TorusGeometry((0.12 - i * 0.006) * S, 0.016 * S, 4, 12), m.trim);
+            r.rotation.x = Math.PI / 2;
+            r.position.y = (-0.14 - i * 0.10) * S;
+            arm.el.add(r);
+          }
+          const core = new THREE.Mesh(new THREE.SphereGeometry(0.075 * S, 10, 8),
+            new THREE.MeshBasicMaterial({ color: '#FF3B30', transparent: true, opacity: 0.85,
+              blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+          core.position.y = -0.40 * S;
+          arm.el.add(core);
+          rig.cannonCore = core;
+        }
+      }
+
+      /* ---------------------------------------------------------------- REX
+         The long coat is already on him; this adds the collar that stands up
+         and the belt of pouches, so he reads as someone who travels. */
+      if (kind === 'rex') {
+        const col = lathe([
+          [0.13 * S, 0.60 * S], [0.19 * S, 0.72 * S], [0.20 * S, 0.80 * S]
+        ], m.cloth, { squash: 0.9, phiStart: 0.55, phiLength: Math.PI * 2 - 1.1 });
+        col.material = Sculpt.twoSided(col.material);
+        j.chest.add(col);
+        for (const side of [-1, 1])
+          j.hips.add(soft(0.075 * S, 0.09 * S, 0.05 * S, m.dark, side * 0.15 * S, 0.02 * S, 0.10 * S, 0.4));
+        j.hips.add(chip(0.34 * S, 0.030 * S, 0.03 * S, m.armor, 0, 0.06 * S, 0.15 * S, 0.3));
+      }
+    });
+  });
+
+  /* ------------------------------------------------------------- ANIMATION
+     A silhouette that never moves differently is only half a silhouette. Each
+     build gets an idle bias — a Brute breathes heavier and swings wider, a
+     Lancer stands very still, a Swarmer never quite stops. */
+  step('idle', () => {
+    Hook.after(BipedRig.prototype, 'update', function (r, dt, s) {
+      const B = this.__build;
+      if (!B || !this.j.chest) return;
+      const d = dt || 0.016;
+      this.__idle = (this.__idle || Math.random() * 40) + d;
+      const heavy = B.size > 1.15 ? 1 : 0;
+      const twitchy = B.size < 0.9 ? 1 : 0;
+      // Heavy things breathe from the chest and sway; light things jitter.
+      const breath = Math.sin(this.__idle * (heavy ? 1.1 : twitchy ? 4.2 : 2.0));
+      this.j.chest.rotation.x += breath * (heavy ? 0.030 : twitchy ? 0.014 : 0.010);
+      this.j.chest.rotation.z += Math.sin(this.__idle * 0.7) * (heavy ? 0.022 : 0.006);
+      if (twitchy) this.j.chest.rotation.y += Math.sin(this.__idle * 6.1) * 0.02;
+    }, 'silo32:idle');
+  });
+
+  console.log('[hexis 3.2] silhouettes online:', done.join(', '));
 })();
 
 /* ===== 360-perf.js ========================================================
@@ -25010,18 +25796,30 @@ html.blackout #dmgvig{ opacity:.55 !important; background:radial-gradient(circle
 
   /* ============================================== THE RESPONSE TEAM */
   const TEAM = [
+    /* Six people, and until 3.2 they were six copies of one silhouette in
+       six colours. `build` and `hair` are what actually tell them apart at
+       twenty metres; the trim colour only helps once you are close enough to
+       read it. `kind` still drives their combat archetype, but it is cleared
+       off the rig before sculpting so the enemy gear pass does not put a riot
+       helm on Monica. */
     { id: 'flare', name: 'Flare', real: 'Monica', trim: '#FF6A2A', suit: '#3a1a12', armor: '#5a2a16',
-      line: 'Do not get in my way. Do not slow me down.', kind: 'enforcer' },
+      line: 'Do not get in my way. Do not slow me down.', kind: 'enforcer',
+      build: 'lean', hair: 'long', skin: '#c98d63', hairCol: '#241612' },
     { id: 'phantom', name: 'Phantom', real: 'David', trim: '#9fd8ff', suit: '#1a2430', armor: '#243444',
-      line: 'I am not a fighter. I never wanted to be a fighter.', kind: 'grunt', ghost: true },
+      line: 'I am not a fighter. I never wanted to be a fighter.', kind: 'grunt', ghost: true,
+      build: 'runner', hair: 'crop', skin: '#dcb08c', hairCol: '#3a2a1e' },
     { id: 'brick', name: 'Brick', real: 'Marcus', trim: '#FFC64D', suit: '#2c2f38', armor: '#4a4433',
-      line: 'The situation sucks. But I have got powers, and I get to use them?', kind: 'brute' },
+      line: 'The situation sucks. But I have got powers, and I get to use them?', kind: 'brute',
+      build: 'titan', hair: 'crop', pauldron: true, skin: '#8d5a38', hairCol: '#15100c' },
     { id: 'specter', name: 'Specter', real: 'Elena', trim: '#7CFFB2', suit: '#1c2a24', armor: '#2a3c33',
-      line: 'We are not here to be heroes. We are here because we are useful.', kind: 'enforcer' },
+      line: 'We are not here to be heroes. We are here because we are useful.', kind: 'enforcer',
+      build: 'shade', hair: 'long', hood: true, skin: '#b8815c', hairCol: '#1c1410' },
     { id: 'ace', name: 'Ace', real: '—', trim: '#B48CFF', suit: '#191426', armor: '#241c36',
-      line: 'I am here to do a job. Nothing more.', kind: 'stalker' },
+      line: 'I am here to do a job. Nothing more.', kind: 'stalker',
+      build: 'lean', hair: 'crop', mask: true, skin: '#a9764f', hairCol: '#12100f' },
     { id: 'pierce', name: 'Cmdr Pierce', real: 'no powers', trim: '#7C8AA3', suit: '#23262c', armor: '#33383f',
-      line: 'You are tools. And I am the one who decides how you are used.', kind: 'grunt' }
+      line: 'You are tools. And I am the one who decides how you are used.', kind: 'grunt',
+      build: 'heavy', hair: 'crop', pauldron: true, skin: '#d3a274', hairCol: '#59544e' }
   ];
 
   step('team', () => {
@@ -25039,6 +25837,27 @@ html.blackout #dmgvig{ opacity:.55 !important; background:radial-gradient(circle
           rig.cfg.hair = true;
           rig.cfg.jacket = true;
           rig.cfg.eye = T.trim;
+          // Silhouette first, colour second.
+          rig.cfg.build = T.build;
+          rig.cfg.hairStyle = T.hair;
+          rig.cfg.pauldron = !!T.pauldron;
+          rig.cfg.hood = !!T.hood;
+          rig.cfg.mask = !!T.mask;
+          rig.cfg.helmet = false;
+          rig.cfg.kind = null;          // people, not troops: no enemy gear
+          rig.__tier = 0;
+          if (T.skin) rig.faceSkin = new THREE.MeshStandardMaterial({
+            color: T.skin, roughness: 0.74, metalness: 0
+          });
+          if (T.hairCol) {
+            rig.faceHair = new THREE.MeshStandardMaterial({
+              color: T.hairCol, roughness: 0.80, metalness: 0
+            });
+            rig.faceHairLit = new THREE.MeshStandardMaterial({
+              color: new THREE.Color(T.hairCol).multiplyScalar(1.45),
+              roughness: 0.78, metalness: 0
+            });
+          }
           rig.mats.suit.color.set(T.suit);
           rig.mats.armor.color.set(T.armor);
           rig.mats.trim.color.set(T.trim);

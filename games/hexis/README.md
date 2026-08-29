@@ -1,4 +1,4 @@
-# HEXIS 3.1 — "Stormbreak"
+# HEXIS 3.2 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -229,6 +229,111 @@ flags the jobs already set, in a new tab in the pause menu.
 
 ---
 
+## 3.2 — the models, properly
+
+3.1 rebuilt the characters out of revolved surfaces instead of boxes. 3.2 is
+the pass that made them *read*. Almost all of it came from looking at renders
+and finding that the thing on screen was not the thing in the code.
+
+### The bug that was making everyone look like cardboard
+
+An open-front jacket is a partial lathe, and a partial lathe needs
+`side = DoubleSide` or you can see through it from the inside. Every version
+up to this one wrote that flag onto the material the mesh was handed — which
+is the rig's *shared* `m.cloth`. One jacket turned every cloth surface on the
+character two-sided, and then every lit interior in the rig — the neck hole,
+the sleeves, the inside of the torso — rendered through the front of the
+character as a blown-out white panel.
+
+That is what the big white slabs on everybody's chest were. `Sculpt.twoSided()`
+now returns a cached two-sided *clone*, keyed off the original material, so the
+flag lands on the one surface that asked for it and the merge still sees two
+materials instead of twenty.
+
+### Layering rails
+
+The other systemic problem was clearance. Shells were being offset by
+multipliers — `chR * 1.08` for a jacket over a chest — which lands as four
+millimetres on the flanks and eleven at the front, and the two surfaces cross
+somewhere in between. The whole torso rendered as diagonal z-fighting hatch,
+and so did every arm.
+
+Two rules now hold across the sculptor:
+
+* **One squash per family.** A chest at 0.72 and a jacket at 0.74 are not
+  parallel surfaces, they are intersecting ones.
+* **Absolute clearances, never multipliers.** A garment clears the body by
+  `CLOTH`, a plate clears the garment by `PLATE`, trim clears the plate by
+  `TRIM`. If a part cannot afford its clearance it belongs in the profile
+  underneath, not as another shell on top.
+
+Applying the second rule collapsed the upper arm from four coaxial surfaces —
+a shoulder ball, a limb cylinder, a bicep lathe and a sleeve, all inside a 4mm
+band, all shredding each other — down to one lathe whose profile *contains*
+the deltoid cap and the bicep. Same for the forearm, the thigh and the shin.
+
+### Faces
+
+Features are now placed against the skull's actual half-width at their own
+height, read back out of the profile the head was lathed from. Before, every
+feature sat at the head's equator radius regardless of height, so the eyes,
+brows and mouth floated on one flat plane in front of a round head.
+
+* The head scale came down from 1.30 to 1.12 — the skull alone used to be a
+  fifth of standing height before the hair went on. It lands near 1/6.4 now.
+* Cheeks, jaw and brow are *mass*, set deep enough into the skull that only a
+  swell of each one clears the surface. At 0.6 of the local half-width they
+  read as separate pebbles glued to the face.
+* The iris was buried: the eye white's front cap sat 0.02 of an eye-radius
+  proud of it, so every character in the game had blank eyes.
+* Faces get a finer sphere than knees do (16 segments against 10). They merge
+  into one buffer per material anyway.
+
+### Hair
+
+`taper()` is built root-down — it already hangs at zero rotation. Every version
+before this pitched the fringe by ~2.9 radians "so it would hang", which
+flipped each strand *up* out of the crown. The character shipped four rounds
+running with a mohawk of horns and a bald forehead.
+
+The cap also started below the temple line, so it swallowed the eyes and the
+brow masses poked back out through it as pale hexagons. There is a real
+hairline now, a separate partial lathe carrying the back and sides down past
+it, and strands wider than their pitch so the fringe is one mass with cut
+edges rather than a row of blades.
+
+### The Response Team
+
+Six people who, until now, were six copies of one silhouette in six colours.
+Each one gets a build, a hair style, a skin tone and hair colour: Brick is a
+titan, Phantom a runner, Flare and Ace lean, Specter a hooded shade, Pierce
+heavy. Their combat archetype still drives how they fight, but `kind` is
+cleared off the rig before sculpting so the enemy gear pass stops putting a
+riot helm on Monica.
+
+### Silhouettes (`355-silhouette.js`)
+
+Build assignment moved into `makeArchetypeRig` itself — it used to ride on the
+`enemy:spawned` event, which only fires from the `Foe` constructor, so half the
+spawn paths never got one. Per-archetype gear: the Enforcer's riot helm and
+grille, the Swarmer's arm blades, the Lancer's rifle, the Warden's tower
+shield, the Brute's hanging pauldron cap and lames, the Stalker's half-cape,
+Kell's crown and cannon arm. Plus a per-build idle bias, so a heavy breathes
+from the chest and a light one jitters.
+
+### Also
+
+* Torsos and limbs get more sides. The torso is the largest revolved surface
+  on screen and the one the key light lands flat on; at the shared segment
+  count it read as a folded plank.
+* Head-mounted gear authored against the old skull is rebased through one
+  scaled group rather than seventeen retuned constants.
+* Pauldrons ran to 1.95x the arm radius, which put their outer edge nearly
+  twice the torso's own half-width out on each side. They are caps that sit on
+  the shoulder now, not wings off it.
+
+---
+
 ## Testing
 
 There is no test harness in the repo — the game is the test — but everything
@@ -258,6 +363,7 @@ games/hexis/
     340-qol.js        pause, log, codex, checkpoints, options
     345-texture.js    procedural textures — nine maps, no downloaded bytes
     350-model.js      the character sculptor: revolved limbs, real faces
+    355-silhouette.js per-archetype builds, gear and idle bias
     360-perf.js       allocation pass, body budget, the rig-merge fix
     370-lore.js       Part One: the Regulator, Blackout, the cast, the codex
   stormlink/          the multiplayer build — see its own README

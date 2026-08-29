@@ -49,10 +49,11 @@ if (openAt >= 0) {
   html = html.slice(0, tag) + '\n' + block + html.slice(tag);
 }
 
-// Keep the build stamp on the title screen honest.
+// Keep the build stamp on the title screen honest. Bump this, not the HTML.
+const VERSION = '3.2 · Stormbreak';
 html = html
-  .replace(/Hexis 2\.4(\.\d+)? · The Storm Trilogy/g, 'Hexis 3.0 · Stormbreak')
-  .replace(/<div class="build">[^<]*<\/div>/, '<div class="build">Hexis 3.0 · Stormbreak</div>');
+  .replace(/Hexis \d+\.\d+(\.\d+)? · (The Storm Trilogy|Stormbreak)/g, 'Hexis ' + VERSION)
+  .replace(/<div class="build">[^<]*<\/div>/, '<div class="build">Hexis ' + VERSION + '</div>');
 
 if (checkOnly) {
   console.log('build --check: ' + files.length + ' modules, ' +
