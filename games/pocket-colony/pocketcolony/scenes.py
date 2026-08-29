@@ -11,6 +11,11 @@ from .pixel import (COL, VH, VW, bar, frame, rect, text, text_c, text_w)
 VERSION = content.VERSION
 
 
+def _on_phone():
+    import os
+    return bool(os.environ.get('ANDROID_ARGUMENT') or os.environ.get('ANDROID_PRIVATE'))
+
+
 def big(s, txt, cx, y, scale, col, shadow=True, tracking=1):
     """Scale the bitmap font up for headline text — stays perfectly blocky."""
     w = text_w(txt, tracking=tracking)
@@ -89,8 +94,8 @@ class Game:
         mode = self.cfg['touch_ui']
         if mode == 'always':
             return True
-        if mode == 'never':
-            return False
+        if mode == 'never' and not _on_phone():
+            return False    # a phone has no other way to move, so never ignore
         return True         # 'auto': the pad is useful with a mouse too
 
     # ── boot ───────────────────────────────────────────────────────────

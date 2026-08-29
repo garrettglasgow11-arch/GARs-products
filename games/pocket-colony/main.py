@@ -18,6 +18,10 @@ from pocketcolony.pixel import COL, VH, VW                  # noqa: E402
 TITLE = 'Pocket Colony'
 TAP_SLOP = 7            # pixels of drift still counted as a tap, not a drag
 
+# python-for-android sets these, and they are the reliable way to tell we are
+# on a phone rather than a desktop.
+ANDROID = bool(os.environ.get('ANDROID_ARGUMENT') or os.environ.get('ANDROID_PRIVATE'))
+
 
 class App:
     def __init__(self):
@@ -49,7 +53,12 @@ class App:
 
     def apply_video(self):
         cfg = self.g.cfg
-        if cfg['fullscreen']:
+        if ANDROID:
+            # A phone has no window to size: take the whole display, and drop
+            # the mouse cursor SDL would otherwise draw.
+            self.win = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            pygame.mouse.set_visible(False)
+        elif cfg['fullscreen']:
             self.win = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
             s = cfg['scale'] or self.auto_scale()
@@ -59,6 +68,15 @@ class App:
 
     def fit(self):
         w, h = self.win.get_size()
+        if ANDROID:
+            # Whole-number scaling would waste most of a phone screen, so fit
+            # the framebuffer to the display and keep the aspect ratio.
+            k = min(w / float(VW), h / float(VH))
+            dw, dh = int(VW * k), int(VH * k)
+            self.scale = k
+            self.dest = pygame.Rect((w - dw) // 2, (h - dh) // 2, dw, dh)
+            self.g.window_label = '%dX%d  FIT %.2fX' % (w, h, k)
+            return
         s = max(1, min(w // VW, h // VH))
         self.scale = s
         self.dest = pygame.Rect((w - VW * s) // 2, (h - VH * s) // 2, VW * s, VH * s)
@@ -212,12 +230,12 @@ class App:
             self.g.frame_ms.append((time.perf_counter() - t0) * 1000.0)
             del self.g.frame_ms[:-240]
             self.g.fps = self.clock.get_fps() or 60.0
-            if self.g.request_video:
+            if self.g.request_video and not ANDROID:
                 self.apply_video()
 
             self.win.fill(COL['black'])
             ox, oy = self.g.shake_offset()
-            dest = self.dest.move(ox * self.scale, oy * self.scale)
+            dest = self.dest.move(int(ox * self.scale), int(oy * self.scale))
             pygame.transform.scale(self.buf, dest.size,
                                    self.win.subsurface(dest.clip(self.win.get_rect())))
             pygame.display.flip()
