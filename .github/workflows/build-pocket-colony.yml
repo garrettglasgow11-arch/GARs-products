@@ -130,7 +130,22 @@ jobs:
           restore-keys: buildozer-${{ runner.os }}-
 
       - name: Build the APK
-        run: buildozer -v android debug
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # On failure buildozer prints a 120-line environment dump and tells you
+      # the real error is "hidden in the log above" - which pushes it out of
+      # reach of anything that reads the tail. Pull it back out.
+      - name: Show what actually failed
+        if: failure()
+        run: |
+          echo '===================== error lines ====================='
+          grep -nE 'error:|fatal error:|ERROR:|Exception|Traceback' \
+            "$RUNNER_TEMP/build.log" | tail -40 || echo '(nothing matched)'
+          echo
+          echo '============ tail, environment dump stripped ============'
+          grep -vE '^[^#]*#[[:space:]]+[A-Z0-9_]+ = ' "$RUNNER_TEMP/build.log" | tail -60
 
       - name: Name the APK
         shell: bash
