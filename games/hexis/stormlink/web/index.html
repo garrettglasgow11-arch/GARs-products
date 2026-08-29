@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>HEXIS: STORMLINK</title>
+<!-- three.js: the vendored copy first so the client works with no network at
+     all, the CDN as the fallback for a checkout that skipped vendor/. -->
+<script src="./vendor/three.min.js"></script>
+<script>
+  if (!window.THREE) {
+    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');
+  }
+</script>
+<style>
+:root{
+  --void:#05070C; --deck:#0B1220; --arc:#5FE3FF; --core:#2B6BFF;
+  --threat:#FF5A3C; --bone:#E8F4FF; --steel:#7C8AA3; --gold:#FFC64D;
+  --disp:'Arial Narrow','Helvetica Neue Condensed',"Roboto Condensed",Impact,system-ui,sans-serif;
+  --mono:ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;
+  --clip:polygon(0 0,calc(100% - 9px) 0,100% 9px,100% 100%,9px 100%,0 calc(100% - 9px));
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden;background:var(--void);color:var(--bone);
+  font-family:var(--mono);touch-action:none;overscroll-behavior:none}
+/* Scoped to the game surface. A bare `canvas` rule here also caught the
+   netgraph inside the HUD panel and pinned it to the viewport, where it sat
+   on top of the ping readout. */
+#gl{display:block;position:fixed;inset:0}
+.lbl{font-size:8px;letter-spacing:.3em;text-transform:uppercase;color:var(--steel);opacity:.75}
+
+/* ---------- gate ---------- */
+#gatewrap{position:fixed;inset:0;z-index:60;display:grid;place-content:center;
+  background:radial-gradient(120% 90% at 74% 20%,rgba(95,227,255,.12),transparent 60%),
+             linear-gradient(var(--void),#070a12 60%,var(--void));
+  transition:opacity .5s ease}
+#gatewrap.gone{opacity:0;pointer-events:none}
+#gate{width:min(460px,90vw);padding:0 8px;border-left:1px solid rgba(95,227,255,.24);padding-left:22px}
+#gate .eyebrow{font-size:10px;letter-spacing:.34em;text-transform:uppercase;color:var(--arc);opacity:.85}
+#gate h1{font-family:var(--disp);font-size:clamp(40px,9vmin,84px);line-height:.86;letter-spacing:.02em;
+  text-transform:uppercase;margin:10px 0 4px}
+#gate h1 i{font-style:normal;color:var(--arc)}
+#gate p{font:400 12px/1.6 system-ui,sans-serif;color:var(--steel);max-width:40ch;margin:8px 0 18px}
+#gate label{display:block;font-size:9px;letter-spacing:.28em;text-transform:uppercase;color:var(--steel);margin-bottom:6px}
+#pname{width:100%;padding:11px 13px;background:rgba(11,18,32,.75);color:var(--bone);
+  border:1px solid rgba(95,227,255,.28);clip-path:var(--clip);font:400 14px/1 var(--mono);letter-spacing:.1em}
+#pname:focus{outline:none;border-color:var(--arc)}
+#gatebtn{margin-top:14px;padding:12px 24px;cursor:pointer;background:none;color:var(--bone);
+  border:1px solid var(--arc);clip-path:var(--clip);font-family:var(--disp);font-size:18px;
+  letter-spacing:.12em;text-transform:uppercase;transition:background .15s,color .15s}
+#gatebtn:hover:not(:disabled){background:var(--arc);color:#04070d}
+#gatebtn:disabled{opacity:.4;cursor:default}
+#gateerr{margin-top:12px;font-size:11px;color:var(--threat);letter-spacing:.08em;display:none}
+#gateerr.on{display:block}
+#gate .keys{margin-top:22px;font-size:10px;line-height:1.9;color:var(--steel);opacity:.8}
+#gate .keys b{color:var(--arc);font-weight:400;border:1px solid rgba(95,227,255,.24);
+  border-radius:3px;padding:.1em .42em;margin-right:.2em}
+
+/* ---------- hud ---------- */
+#hud{position:fixed;inset:0;pointer-events:none;z-index:20;opacity:0;transition:opacity .6s ease}
+#hud.on{opacity:1}
+#vitals{position:absolute;left:max(14px,env(safe-area-inset-left));bottom:max(14px,env(safe-area-inset-bottom));width:min(280px,44vw)}
+.meter{height:9px;background:#0d1522;border:1px solid #1d2c44;clip-path:var(--clip);overflow:hidden;margin-bottom:5px}
+.meter i{display:block;height:100%;transform-origin:left;transform:scaleX(1);transition:transform .1s linear}
+#hp{background:linear-gradient(90deg,var(--core),var(--arc));box-shadow:0 0 12px #2B6BFF88}
+#en{background:linear-gradient(90deg,#7CFFB2,var(--arc));box-shadow:0 0 12px #5FE3FF66}
+#name{position:absolute;left:max(14px,env(safe-area-inset-left));top:max(12px,env(safe-area-inset-top));
+  font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--arc)}
+#combo{position:absolute;right:max(14px,env(safe-area-inset-right));top:calc(max(12px,env(safe-area-inset-top)) + 118px);
+  font-family:var(--disp);font-size:26px;letter-spacing:.08em;color:var(--gold);text-align:right}
+#banner{position:absolute;left:50%;top:22%;transform:translateX(-50%) scale(.94);
+  font-family:var(--disp);font-size:clamp(28px,6vmin,56px);letter-spacing:.22em;text-transform:uppercase;
+  color:var(--bone);text-shadow:0 0 40px rgba(95,227,255,.5);opacity:0;transition:opacity .3s,transform .3s}
+#banner.on{opacity:1;transform:translateX(-50%) scale(1)}
+#feed{position:absolute;right:max(14px,env(safe-area-inset-right));bottom:calc(max(14px,env(safe-area-inset-bottom)) + 128px);
+  width:min(260px,50vw);font-size:10px;line-height:1.8;color:var(--steel);text-align:right}
+#feed b{color:var(--bone);font-weight:400}
+
+/* net panel — the reason this build exists, so it is not hidden in a submenu */
+#net{position:absolute;right:max(14px,env(safe-area-inset-right));top:max(12px,env(safe-area-inset-top));
+  width:172px;padding:8px 10px;background:rgba(5,7,12,.66);border:1px solid rgba(95,227,255,.2);clip-path:var(--clip)}
+#net .row{display:flex;justify-content:space-between;font-size:10px;line-height:1.7;color:var(--steel)}
+#net .row b{font-weight:400;color:var(--bone);font-variant-numeric:tabular-nums}
+#graph{display:block;width:100%;height:34px;margin-top:5px;background:rgba(5,7,12,.5)}
+
+#board{position:absolute;left:50%;top:max(12px,env(safe-area-inset-top));transform:translateX(-50%);
+  background:rgba(5,7,12,.6);border:1px solid rgba(95,227,255,.18);clip-path:var(--clip);padding:7px 12px}
+#board table{border-collapse:collapse;font-size:10px}
+#board td{padding:1px 9px;color:var(--steel);letter-spacing:.08em}
+#board td:nth-child(2){color:var(--gold);font-variant-numeric:tabular-nums;text-align:right}
+#board td:nth-child(3){color:var(--arc);font-variant-numeric:tabular-nums;text-align:right}
+#board tr.me td{color:var(--bone)}
+#board tr.dead td{opacity:.4}
+
+/* ---------- chat ---------- */
+#chatwrap{position:fixed;left:50%;bottom:16%;transform:translateX(-50%);z-index:40;
+  width:min(520px,88vw);display:none}
+#chatwrap.on{display:block}
+#chatin{width:100%;padding:10px 12px;background:rgba(5,7,12,.9);color:var(--bone);
+  border:1px solid var(--arc);clip-path:var(--clip);font:400 13px/1 var(--mono);letter-spacing:.06em}
+#chatin:focus{outline:none}
+
+/* ---------- touch ---------- */
+#touch{position:fixed;inset:0;z-index:30;pointer-events:none;display:none}
+#touch.on{display:block}
+#stick{position:absolute;left:max(5vw,env(safe-area-inset-left));bottom:calc(9vh + env(safe-area-inset-bottom));
+  width:124px;height:124px;border-radius:50%;border:1px solid rgba(95,227,255,.22);
+  background:rgba(8,13,22,.32);pointer-events:auto}
+#nub{position:absolute;left:50%;top:50%;width:50px;height:50px;margin:-25px 0 0 -25px;border-radius:50%;
+  background:rgba(95,227,255,.28);border:1px solid rgba(95,227,255,.5)}
+#tbtns{position:absolute;right:max(4vw,env(safe-area-inset-right));bottom:calc(7vh + env(safe-area-inset-bottom));
+  display:grid;grid-template-columns:repeat(3,1fr);gap:8px;pointer-events:auto}
+#tbtns div{width:62px;padding:11px 0;text-align:center;font-size:9px;letter-spacing:.16em;
+  color:var(--bone);background:rgba(8,13,22,.6);border:1px solid rgba(95,227,255,.26);clip-path:var(--clip)}
+#tbtns div:active{background:rgba(95,227,255,.3);color:#04070d}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="hud">
+  <div id="name">—</div>
+  <div id="board"></div>
+  <div id="banner"></div>
+  <div id="combo"></div>
+  <div id="feed"></div>
+
+  <div id="net">
+    <div class="row"><span>ping</span><b id="rtt">—</b></div>
+    <div class="row"><span>jitter</span><b id="jit">—</b></div>
+    <div class="row"><span>traffic</span><b id="kbps">—</b></div>
+    <div class="row"><span>predict</span><b id="corr">—</b></div>
+    <div class="row"><span>server</span><b id="tick">—</b></div>
+    <canvas id="graph" width="150" height="34"></canvas>
+  </div>
+
+  <div id="vitals">
+    <div class="meter"><i id="hp"></i></div>
+    <div class="meter"><i id="en"></i></div>
+    <span class="lbl">Integrity · Charge</span>
+  </div>
+</div>
+
+<div id="touch">
+  <div id="stick"><div id="nub"></div></div>
+  <div id="tbtns">
+    <div data-k="T_ATK">SLASH</div>
+    <div data-k="T_HEAVY">HEAVY</div>
+    <div data-k="T_BOLT">BOLT</div>
+    <div data-k="T_JUMP">JUMP</div>
+    <div data-k="T_DASH">DASH</div>
+    <div data-k="T_GUARD">GUARD</div>
+  </div>
+</div>
+
+<div id="chatwrap"><input id="chatin" maxlength="160" placeholder="say something — enter to send, escape to cancel"></div>
+
+<div id="gatewrap">
+  <form id="gate">
+    <p class="eyebrow">Hexis · Stormlink</p>
+    <h1>STORM<i>L</i>INK</h1>
+    <p>Up to eight of you against the waves, on one authoritative server. Your
+       own movement is predicted locally and corrected against the truth;
+       everything else is interpolated a tenth of a second behind. The panel in
+       the corner tells you exactly what your connection is doing.</p>
+    <label for="pname">Callsign</label>
+    <input id="pname" maxlength="18" autocomplete="off" spellcheck="false">
+    <div><button id="gatebtn" type="submit">Connect</button></div>
+    <div id="gateerr"></div>
+    <div class="keys">
+      <b>WASD</b> move <b>SPACE</b> jump, twice to double <b>SHIFT</b> run, tap to dash<br>
+      <b>LMB</b> slash <b>Q</b> heavy <b>E</b> bolt <b>F</b> / <b>RMB</b> guard<br>
+      <b>MOUSE</b> look, click to capture <b>ENTER</b> chat
+    </div>
+  </form>
+</div>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
