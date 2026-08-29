@@ -10,7 +10,7 @@ import random
 import pygame
 
 from . import art, save
-from .pixel import COL, rect, text, text_c
+from .pixel import COL, rect, text_c
 
 TILE = 8
 
@@ -269,28 +269,28 @@ def render_surface(m):
             if m.g[ty][tx] == '#' and _hash(tx, ty, 8) % 3:
                 art.blit(s, 'env_rock', tx * TILE - 1, ty * TILE - 1)
 
-    for _ in range(430):                              # ground cover
+    for _ in range(360):                              # ground cover
         x, y = rng.randrange(20, m.pw() - 20), rng.randrange(20, m.ph() - 20)
         if m.blocked(x, y, 5):
             continue
         r = rng.random()
-        art.blit(s, 'env_grass' if r < 0.68 else
-                 ('env_pebble' if r < 0.86 else
-                  ('env_flower' if r < 0.985 else 'env_mush')), x, y)
+        art.blit(s, 'env_grass' if r < 0.70 else
+                 ('env_pebble' if r < 0.93 else
+                  ('env_flower' if r < 0.98 else 'env_mush')), x, y)
     for tx, ty in m.plants:
         art.blit(s, 'env_plant', tx * TILE - 5, ty * TILE - 12)
 
     hx, hy = m.nodes['H']                             # the home mound
     for i, col in enumerate(((46, 33, 20), (66, 48, 29), (88, 65, 39), (110, 82, 50))):
-        r = 27 - i * 5
+        r = 34 - i * 6
         pygame.draw.ellipse(s, col, (hx - r, hy - r * 3 // 4, r * 2, r * 3 // 2))
     for i in range(40):                               # spoil grains on the rim
         a = rng.random() * math.tau
-        d = 16 + rng.random() * 10
+        d = 20 + rng.random() * 12
         rect(s, int(hx + math.cos(a) * d), int(hy + math.sin(a) * d * 0.72), 1, 1,
              (126, 96, 58))
-    pygame.draw.ellipse(s, (8, 6, 4), (hx - 8, hy - 6, 16, 12))
-    pygame.draw.ellipse(s, (30, 21, 13), (hx - 8, hy - 7, 16, 5))
+    pygame.draw.ellipse(s, (8, 6, 4), (hx - 10, hy - 8, 20, 15))
+    pygame.draw.ellipse(s, (30, 21, 13), (hx - 10, hy - 9, 20, 6))
     m.surf = s
 
 
@@ -486,6 +486,19 @@ class Particle:
         return self.life > 0
 
 
+class Float:
+    """A damage number drifting up off whatever was hit."""
+
+    def __init__(self, x, y, msg, col):
+        self.x, self.y, self.msg, self.col = x, y, msg, col
+        self.life = self.max = 0.75
+
+    def update(self, dt):
+        self.y -= dt * 22
+        self.life -= dt
+        return self.life > 0
+
+
 class Toast:
     def __init__(self, msg, col='paper', life=2.6):
         self.msg = msg
@@ -516,7 +529,10 @@ class World:
         self.freeze_spawns = False
         self.god = False
         self.noclip = False
+        self.show_numbers = True
         self.rng = random.Random()
+        self.floats = []
+        self.on_event = None
         self._populate()
         self.sync_ants()
         self.snap_camera()
@@ -580,6 +596,7 @@ class World:
             a.y = self.player.y + self.rng.uniform(-16, 16)
             a.carry = None
             a.target = None
+        self.fire('zone')
         self.snap_camera()
 
     def deposit_player(self):
@@ -592,8 +609,18 @@ class World:
         self.player.carry = []
         bits = ' '.join('+%d %s' % (v, save.RES_NAME[k]) for k, v in tally.items() if v)
         self.toast(bits or 'STORES ARE FULL', 'leaf' if bits else 'red')
+        self.fire('deposit' if bits else 'error')
 
     # ── feedback ───────────────────────────────────────────────────────
+    def fire(self, name, x=0.0, y=0.0):
+        """Tell the shell something happened, so it can play a sound or shake."""
+        if self.on_event:
+            self.on_event(name, x, y)
+
+    def number(self, x, y, msg, col='white'):
+        self.floats.append(Float(x, y, msg, COL[col]))
+        del self.floats[:-24]
+
     def toast(self, msg, col='paper'):
         self.toasts.append(Toast(msg, col))
         del self.toasts[:-4]
@@ -641,6 +668,7 @@ class World:
                     p.carry.append(it.res)
                     self.items.remove(it)
                     self.puff(it.x, it.y, 3, COL['amber_l'], 22)
+                    self.fire('pickup', it.x, it.y)
         if self.zone == 'colony' and p.hp < self.st.max_hp():
             p.hp = min(self.st.max_hp(), p.hp + dt * 2.2)
         self.st.hp = p.hp
@@ -651,27 +679,32 @@ class World:
         p.atk_cd = 0.42
         p.swing = 0.2
         dmg = save.player_atk(self.st.lv('barracks'))
-        hx, hy = p.x + math.cos(p.ang) * 9, p.y + math.sin(p.ang) * 9
+        hx, hy = p.x + math.cos(p.ang) * 11, p.y + math.sin(p.ang) * 11
         self.puff(hx, hy, 3, COL['amber_l'], 26)
+        self.fire('bite', hx, hy)
         hit = False
         for e in list(self.enemies):
-            if math.hypot(e.x - hx, e.y - hy) < 11:
+            if math.hypot(e.x - hx, e.y - hy) < 13:
                 hit = True
+                self.number(e.x, e.y - 10, str(int(dmg)), 'white')
                 if e.hurt(dmg):
                     self.kill_enemy(e)
         for n in list(self.nests):
-            if not n.dead and math.hypot(n.x - hx, n.y - hy) < 16:
+            if not n.dead and math.hypot(n.x - hx, n.y - hy) < 18:
                 hit = True
+                self.number(n.x, n.y - 14, str(int(dmg)), 'white')
                 if n.hurt(dmg):
                     self.kill_nest(n)
         if hit:
             self.puff(hx, hy, 5, COL['red'], 40)
+            self.fire('hit', hx, hy)
 
     def kill_enemy(self, e):
         if e in self.enemies:
             self.enemies.remove(e)
         self.st.kills += 1
         self.puff(e.x, e.y, 9, COL['meat'], 55)
+        self.fire('kill', e.x, e.y)
         for _ in range(1 + self.rng.randrange(2)):
             x, y = self.map.free_spot(self.rng, e.x, e.y, 12)
             self.spawn_item('meat', x, y)
@@ -684,6 +717,7 @@ class World:
             x, y = self.map.free_spot(self.rng, n.x, n.y, 26)
             self.spawn_item(self.rng.choice(('leaf', 'meat', 'sand', 'dew')), x, y)
         self.toast('NEST DESTROYED', 'amber')
+        self.fire('kill', n.x, n.y)
         self._nest_respawn = getattr(self, '_nest_respawn', [])
         self._nest_respawn.append([120.0, n.idx])
 
@@ -752,6 +786,8 @@ class World:
             self.player.hurt(dmg)
             self.st.hp = self.player.hp
             self.puff(self.player.x, self.player.y, 5, COL['red'], 45)
+            self.number(self.player.x, self.player.y - 12, '-%d' % int(dmg), 'red')
+            self.fire('hurt', self.player.x, self.player.y)
             if self.player.hp <= 0:
                 self.player_down()
         else:
@@ -828,6 +864,7 @@ class World:
 
     def _fx(self, dt):
         self.parts = [q for q in self.parts if q.update(dt)]
+        self.floats = [f for f in self.floats if f.update(dt)]
         for t in self.toasts:
             t.life -= dt
         self.toasts = [t for t in self.toasts if t.life > 0]
@@ -889,6 +926,8 @@ class World:
                 self.puff(target.x, target.y, 5, COL['dew'], 30)
                 self.toast('+%d DEW' % got if got else 'DEW STORE FULL',
                            'dew' if got else 'red')
+                self.number(target.x, target.y - 10, '+%d' % got, 'dew')
+                self.fire('pickup' if got else 'error', target.x, target.y)
             return None
         if kind == 'chamber':
             return target        # scenes.py opens the panel
@@ -945,6 +984,12 @@ class World:
             art.blit_c(s, save.RES_ICON[res],
                        int(p.x - cx) - (len(p.carry) - 1) * 3 + i * 6, int(p.y - cy) - 13)
 
+        if getattr(self, 'show_numbers', True):
+            for f in self.floats:
+                if f.life < 0.25 and int(f.life * 24) % 2:
+                    continue
+                from .pixel import text_sh_c
+                text_sh_c(s, f.msg, int(f.x - cx), int(f.y - cy), f.col, small=True)
         for q in self.parts:
             a = q.life / q.max
             if a > 0.25 or int(self.time * 30) % 2:

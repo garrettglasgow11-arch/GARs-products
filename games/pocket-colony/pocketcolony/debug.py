@@ -3,7 +3,6 @@
 Opened with F3 or from the pause menu.  Everything here is drawn with the same
 bitmap fonts as the rest of the game, in the 3x5 face so it fits.
 """
-import math
 import os
 import platform
 import sys
@@ -11,8 +10,8 @@ import time
 
 import pygame
 
-from . import art, save, world
-from .pixel import COL, VH, VW, bar, frame, panel, rect, text, text_c, text_w
+from . import art, content, fanart, menus, save, settings, sfx, world
+from .pixel import COL, VH, VW, frame, rect, text, text_c, text_w
 
 TABS = ('DIAG', 'TOGGLE', 'CHEAT', 'TEST', 'LOG')
 
@@ -238,8 +237,9 @@ class Debug:
 class _Null:
     """Empty input so the sim keeps ticking while a menu is up."""
     mx = my = 0.0
-    attack = action = back = False
+    attack = action = back = toggle_debug = False
     tap = held = None
+    wheel = 0
 
 
 def run_tests(g):
@@ -379,6 +379,74 @@ def run_tests(g):
         assert st.dew <= st.cap(), 'idle overflowed the store'
         return 'capped at %d' % st.cap()
 
+    def t_settings_roundtrip():
+        cfg = settings.Settings()
+        before = dict(cfg.d)
+        cfg['sfx_vol'] = 33
+        cfg['stick_side'] = 'right'
+        again = settings.Settings()
+        assert again['sfx_vol'] == 33, 'volume did not persist'
+        assert again['stick_side'] == 'right', 'stick side did not persist'
+        cfg.d = before
+        cfg.save()
+        return 'persists'
+
+    def t_settings_defaults():
+        cfg = settings.Settings()
+        for k in settings.DEFAULTS:
+            assert cfg[k] is not None, 'setting %s reads as None' % k
+        cfg.reset()
+        assert cfg['sfx'] is True, 'reset did not restore defaults'
+        return '%d keys' % len(settings.DEFAULTS)
+
+    def t_sfx_recipes():
+        for name, spec in sfx.RECIPES.items():
+            assert spec, '%s has no steps' % name
+            for step in spec:
+                assert len(step) == 5, '%s step is malformed' % name
+                assert step[0] in ('sq', 'saw', 'tri', 'noise'), \
+                    '%s uses unknown shape %r' % (name, step[0])
+        return '%d effects' % len(sfx.RECIPES)
+
+    def t_text_fits():
+        from .pixel import VW
+        cols = menus.COLS
+        for label, body in ([('TERMS', content.TERMS), ('PRIVACY', content.PRIVACY),
+                             ('CREDITS', content.CREDITS)]
+                            + [(t, b) for t, b in content.GUIDE]):
+            for ln, _ in content.wrap_tagged(body, cols):
+                assert len(ln) <= cols, '%s line over %d cols: %r' % (label, cols, ln)
+        return '<= %d cols, fits %d px' % (cols, VW)
+
+    def t_menu_screens():
+        m = menus.Menus()
+        for _, dest, _, _ in m.ITEMS:
+            if dest in ('resume', 'beta'):
+                continue
+            assert hasattr(m, 'draw_' + dest), 'no screen for %r' % dest
+        return '%d screens' % (len(m.ITEMS) - 2)
+
+    def t_fanart():
+        import pygame as pg
+        surf = pg.Surface((fanart.ART_W + 8, fanart.ART_H + 8))
+        for i in range(len(fanart.PIECES)):
+            fanart.render(i, surf, 4, 4, 0.0)
+            p = fanart.PIECES[i]
+            for key in ('title', 'artist', 'handle', 'date', 'note'):
+                assert p.get(key), 'piece %d missing %s' % (i, key)
+        return '%d pieces' % len(fanart.PIECES)
+
+    def t_hud_fits():
+        from .pixel import VW
+        from . import ui as _ui
+        cfg = settings.Settings()
+        jx, jy, jr = _ui.stick_geom(cfg)
+        ax, ay, ar = _ui.bite_geom(cfg)
+        assert jx - jr >= 0 and jx + jr <= VW, 'stick off screen'
+        assert ax - ar >= 0 and ax + ar <= VW, 'bite button off screen'
+        assert abs(jx - ax) > jr + ar - 4, 'stick and bite overlap'
+        return 'stick %d,%d r%d' % (jx, jy, jr)
+
     for name, fn in (
             ('SAVE ROUNDTRIP', t_save_roundtrip),
             ('SAVE VERSION GUARD', t_save_rejects_old),
@@ -394,7 +462,14 @@ def run_tests(g):
             ('SPAWNS WALKABLE', t_spawns_walkable),
             ('ENTITIES IN BOUNDS', t_entities_in_bounds),
             ('ROSTER SYNC', t_roster_matches),
-            ('IDLE BOUNDED', t_idle_bounded)):
+            ('IDLE BOUNDED', t_idle_bounded),
+            ('SETTINGS PERSIST', t_settings_roundtrip),
+            ('SETTINGS DEFAULTS', t_settings_defaults),
+            ('SFX RECIPES', t_sfx_recipes),
+            ('TEXT FITS WIDTH', t_text_fits),
+            ('MENU SCREENS EXIST', t_menu_screens),
+            ('FAN ART RENDERS', t_fanart),
+            ('TOUCH ZONES ON SCREEN', t_hud_fits)):
         check(name, fn)
     return out
 

@@ -1,9 +1,9 @@
 # Pocket Colony
 
-A fan-made ant colony sim. Native desktop game — Python + pygame, no browser,
-no HTML. Every pixel is drawn by the game: the fonts are bitmap data, the
-sprites are hand-authored pixel art, and the entire UI is rendered onto a
-200x356 framebuffer that gets scaled up by a whole number.
+A fan-made ant colony sim. Native game — Python + pygame, no browser, no HTML.
+Every pixel is drawn by the game: the fonts are bitmap data, the sprites are
+hand-authored pixel art, the sound effects are synthesised at load, and the
+entire UI is rendered onto a 224×400 framebuffer scaled up by a whole number.
 
 ## Running it
 
@@ -12,16 +12,30 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
+### Android
+
+```sh
+pip install buildozer
+buildozer -v android debug        # APK lands in bin/
+```
+
+`buildozer.spec` is set up for portrait, fullscreen, arm64 + armv7. Touch is
+handled through SDL finger events, so the stick and the buttons work at the
+same time — you can steer and bite with two thumbs.
+
 ## Controls
 
 | | |
 |---|---|
 | Move | `WASD` / arrows, or drag the on-screen stick |
 | Bite | `SPACE` / `J`, or the BITE button |
-| Use / enter | `E` / `RETURN`, or the prompt button |
-| Menu | `ESC` |
+| Use / enter | `E` / `RETURN`, or tap the prompt |
+| Menu | `ESC`, or the gear icon |
 | Beta tester menu | `F3` |
 | Fullscreen | `F11` |
+
+The stick can be moved to either side of the screen, resized, and its deadzone
+tuned, in Settings → Controls.
 
 ## How it plays
 
@@ -30,8 +44,8 @@ You control one ant directly. Two zones:
 - **Surface** — open ground. Forage leaves, seeds, sand and meat; milk aphids
   for honeydew; fight beetles, wasps, spiders, termites and grubs. Three bug
   nests spawn defenders and can be destroyed for a loot burst (they rebuild
-  after a while). Your workers follow you and haul food back to the mound on
-  their own; your soldiers follow and fight.
+  after a couple of minutes). Your workers follow you and haul food back to the
+  mound on their own; your soldiers follow and fight.
 - **Colony** — walk down the entrance shaft into the nest and move room to
   room. Each chamber is a place you stand in, not a menu entry:
 
@@ -40,48 +54,89 @@ You control one ant directly. Two zones:
 | Royal Chamber | The queen lays eggs, eating leaf and meat |
 | Nursery | Egg capacity, and where you hatch workers or soldiers |
 | Storeroom | Raises the cap on every resource |
-| Tunnel Network | Carry capacity, move speed, worker cap |
+| Tunnel Network | Bag size, move speed, worker cap |
 | Barracks | Soldier cap, soldier attack, and your own bite and health |
 | Aphid Farm | Passive honeydew |
 
-Walking into the colony deposits whatever you are carrying. Dying drops half
-your load and drags you home — no run is ever lost outright.
+Walking into the colony banks whatever you are carrying. Dying drops half your
+load and drags you home — no run is ever lost outright.
 
-Progress saves automatically to your user data directory
-(`~/.local/share/pocket-colony/save.json` on Linux). Time away is paid out on
-load, capped at 8 hours.
+Progress saves automatically to your user data directory. Time away is paid out
+on load, capped at 8 hours.
+
+## Menu
+
+The gear icon (or `ESC`) opens:
+
+- **How to play** — a six-page illustrated guide.
+- **Bestiary** — every creature with its stats, drawn from the live tables.
+- **Fan art** — a gallery of submitted pieces.
+- **Display** — pixel scale, fullscreen, FPS counter, scanline overlay.
+- **Controls** — stick side, size, deadzone, touch button policy, key list.
+- **Audio** — effects on/off, volume, a test button, device status.
+- **Gameplay** — screen shake, damage numbers, hints, autosave.
+- **Terms of Use** and **Privacy Policy** — the full text, in game.
+- **Credits**, **Beta tester menu**, and **Save and data**.
 
 ## Beta tester menu
 
-`F3`, or from the pause menu. Five tabs:
+`F3`, or from the menu. Five tabs:
 
 - **DIAG** — FPS, frame-time graph, entity counts, camera and player position,
   live colony state, save size, and Python/pygame/SDL versions.
 - **TOGGLE** — hitboxes, target lines, tile grid, FPS overlay, god mode,
-  noclip, freeze spawns, and a sim-speed multiplier (stop / 1x / 2x / 5x).
+  noclip, freeze spawns, and a sim-speed multiplier (stop / 1× / 2× / 5×).
 - **CHEAT** — grant resources, fill the nursery, level or max chambers, spawn
   ants and enemies, teleport between zones, force a save, wipe and restart.
-- **TEST** — runs 15 assertions over the save format, resource caps, the queen's
-  costs, hatch gating, upgrade pricing, sprite and rotation-ring integrity,
-  colony connectivity, spawn walkability and roster sync.
+- **TEST** — 22 assertions over the save format, settings persistence, resource
+  caps, the queen's costs, hatch gating, upgrade pricing, sprite and
+  rotation-ring integrity, colony connectivity, spawn walkability, roster sync,
+  sound recipes, text that must fit the panel width, that every menu entry has
+  a screen behind it, that the fan art renders, and that the touch controls
+  land on screen.
 - **LOG** — a timestamped trail of what the menu did.
+
+## Privacy
+
+The game makes no network connections of any kind. No accounts, no analytics,
+no telemetry, no ads. Two files are written to your own device — `save.json`
+and `settings.json` — and nothing else is stored anywhere. The full policy is
+readable in game under Menu → Privacy Policy.
 
 ## Layout
 
 ```
-main.py                 window, integer scaling, input, main loop
+main.py                 window, integer scaling, keyboard/mouse/touch, main loop
+buildozer.spec          Android packaging
 pocketcolony/
   pixel.py              framebuffer, 5x7 and 4x6 bitmap fonts, primitives
   art.py                sprite pixel data, palettes, outline + rotation baking
   save.py               colony state, tuning curves, persistence (no pygame)
+  settings.py           player preferences, persisted separately
+  sfx.py                procedurally synthesised sound effects
+  content.py            guide, terms, privacy policy, credits, word wrapping
+  fanart.py             the fan art gallery pieces
   world.py              tile maps, entities, simulation, world rendering
-  ui.py                 immediate-mode widgets, HUD, touch pad
-  scenes.py             boot sequence, title, play, chamber panels, pause
+  ui.py                 immediate-mode widget kit, HUD, touch pad
+  menus.py              settings and information screens
+  scenes.py             boot sequence, title, play, chamber panels
   debug.py              beta tester menu and the self-test suite
 ```
 
-`save.py` deliberately has no pygame import, which is what lets the self-tests
-exercise the rules directly.
+`save.py`, `settings.py` and `content.py` deliberately have no pygame import,
+which is what lets the self-tests exercise the rules and the text directly.
+
+## Art notes
+
+Sprites are authored as strings of palette indices and validated at bake time —
+a ragged row or an unknown colour raises rather than rendering wrong. Creatures
+and items get a 1px dark rim generated automatically, which is what lets them
+read against grass and soil alike; legs are drawn attached to the body, because
+anything with a gap under 3px closes up once the rim is added.
+
+Terrain is built from small pre-generated noise tilesets rather than per-pixel
+work, with dithered region boundaries so meadows and bare earth blend instead of
+snapping to a grid. Colony floors are tinted per chamber.
 
 ## Fan project
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Pocket Colony — entry point.
 
-Opens the window, scales the low-res framebuffer up by a whole number, turns
-keys/mouse/touch into one Inp per frame, and runs the loop.
+Opens the window, scales the low-res framebuffer up by a whole number, folds
+keyboard, mouse and multi-touch into one Inp per frame, and runs the loop.
 """
 import os
 import sys
@@ -12,76 +12,129 @@ import pygame
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from pocketcolony import art, debug, scenes            # noqa: E402
-from pocketcolony.pixel import COL, VH, VW             # noqa: E402
+from pocketcolony import art, debug, scenes, sfx, ui        # noqa: E402
+from pocketcolony.pixel import COL, VH, VW                  # noqa: E402
 
 TITLE = 'Pocket Colony'
-
-
-def pick_scale():
-    try:
-        info = pygame.display.Info()
-        s = min((info.current_w * 0.85) // VW, (info.current_h * 0.85) // VH)
-        return max(2, min(6, int(s)))
-    except pygame.error:
-        return 2
+TAP_SLOP = 7            # pixels of drift still counted as a tap, not a drag
 
 
 class App:
     def __init__(self):
         pygame.display.init()
-        try:                                    # a machine with no sound card is fine
-            pygame.mixer.init()
-        except pygame.error:
-            pass
-        pygame.font.init() if False else None   # we never use system fonts
-        self.scale = pick_scale()
-        self.fullscreen = False
-        self.win = pygame.display.set_mode((VW * self.scale, VH * self.scale),
-                                           pygame.RESIZABLE)
-        pygame.display.set_caption(TITLE)
-        art.bake_one('ant_worker')              # needed by the boot screen
-        art.bake_one('ant_queen')
+        self.scale = 2
+        self.win = None
+        self.dest = pygame.Rect(0, 0, VW, VH)
         self.buf = pygame.Surface((VW, VH))
         self.g = scenes.Game()
         self.g.debug = debug.Debug()
-        self.g.sim_speed = 1.0
+        self.apply_video()
+        pygame.display.set_caption(TITLE)
+        art.bake_one('ant_worker')          # the boot screen needs these two
+        art.bake_one('ant_queen')
+        sfx.init()
         self.clock = pygame.time.Clock()
-        self.prev = {}
-        self.stick_drag = False
-        self.pointer = None
+        self.fingers = {}
         self.tap = None
-        self.dest = self._dest()
+        self.wheel = 0
 
-    # ── screen fitting ─────────────────────────────────────────────────
-    def _dest(self):
+    # ── window ─────────────────────────────────────────────────────────
+    def auto_scale(self):
+        try:
+            info = pygame.display.Info()
+            s = min((info.current_w * 0.9) // VW, (info.current_h * 0.9) // VH)
+            return max(1, min(8, int(s)))
+        except pygame.error:
+            return 2
+
+    def apply_video(self):
+        cfg = self.g.cfg
+        if cfg['fullscreen']:
+            self.win = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        else:
+            s = cfg['scale'] or self.auto_scale()
+            self.win = pygame.display.set_mode((VW * s, VH * s), pygame.RESIZABLE)
+        self.fit()
+        self.g.request_video = False
+
+    def fit(self):
         w, h = self.win.get_size()
         s = max(1, min(w // VW, h // VH))
         self.scale = s
-        return pygame.Rect((w - VW * s) // 2, (h - VH * s) // 2, VW * s, VH * s)
+        self.dest = pygame.Rect((w - VW * s) // 2, (h - VH * s) // 2, VW * s, VH * s)
+        self.g.window_label = '%dX%d  SCALE %dX' % (w, h, s)
 
     def to_virtual(self, pos):
-        x = (pos[0] - self.dest.x) / self.scale
-        y = (pos[1] - self.dest.y) / self.scale
-        return (x, y)
+        return ((pos[0] - self.dest.x) / self.scale,
+                (pos[1] - self.dest.y) / self.scale)
 
-    def toggle_fullscreen(self):
-        self.fullscreen = not self.fullscreen
-        flags = pygame.FULLSCREEN if self.fullscreen else pygame.RESIZABLE
-        size = (0, 0) if self.fullscreen else (VW * 2, VH * 2)
-        self.win = pygame.display.set_mode(size, flags)
-        self.dest = self._dest()
+    # ── control zones ──────────────────────────────────────────────────
+    def zones(self):
+        cfg = self.g.cfg
+        return ui.stick_geom(cfg), ui.bite_geom(cfg), ui.act_geom()
 
-    # ── control zones (must match ui.pad) ──────────────────────────────
-    JOY = (36, VH - 42, 34)
-    ATK = (VW - 34, VH - 42, 24)
-    ACT = (VW // 2 - 44, VH - 82, 88, 19)
+    @staticmethod
+    def in_circle(p, c, pad=8):
+        return (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 <= (c[2] + pad) ** 2
 
-    def in_circle(self, p, c):
-        return (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 <= c[2] ** 2
-
-    def in_rect(self, p, r):
+    @staticmethod
+    def in_rect(p, r):
         return r[0] <= p[0] < r[0] + r[2] and r[1] <= p[1] < r[1] + r[3]
+
+    def press(self, fid, p, inp):
+        """Route a new touch/click to the stick, a button, or the UI."""
+        joy, atk, act = self.zones()
+        touch_on = self.g.mode == 'play' and self.g.show_touch()
+        if touch_on and self.in_circle(p, joy) and not any(
+                f['role'] == 'stick' for f in self.fingers.values()):
+            self.fingers[fid] = {'role': 'stick', 'start': p, 'pos': p, 'moved': 0.0}
+            self.set_stick(p)
+            return
+        if touch_on and self.in_circle(p, atk):
+            inp.attack = True
+            self.fingers[fid] = {'role': 'btn', 'start': p, 'pos': p, 'moved': 0.0}
+            return
+        if (touch_on and self.in_rect(p, act) and self.g.world
+                and self.g.world.prompt()):
+            inp.action = True
+            self.fingers[fid] = {'role': 'btn', 'start': p, 'pos': p, 'moved': 0.0}
+            return
+        self.fingers[fid] = {'role': 'ui', 'start': p, 'pos': p, 'moved': 0.0}
+
+    def move(self, fid, p):
+        f = self.fingers.get(fid)
+        if not f:
+            return
+        f['moved'] += abs(p[0] - f['pos'][0]) + abs(p[1] - f['pos'][1])
+        f['pos'] = p
+        if f['role'] == 'stick':
+            self.set_stick(p)
+
+    def release(self, fid, p):
+        f = self.fingers.pop(fid, None)
+        if not f:
+            return
+        if f['role'] == 'stick':
+            self.g.stick = None
+        elif f['role'] == 'ui' and f['moved'] <= TAP_SLOP:
+            self.tap = p           # a real tap, not the end of a drag
+
+    def set_stick(self, p):
+        joy, _, _ = self.zones()
+        dx = (p[0] - joy[0]) / float(joy[2] - 6)
+        dy = (p[1] - joy[1]) / float(joy[2] - 6)
+        n = (dx * dx + dy * dy) ** 0.5
+        if n > 1.0:
+            dx, dy = dx / n, dy / n
+        dead = self.g.cfg['deadzone'] / 100.0
+        self.g.stick = (dx, dy) if n > dead else None
+
+    def ui_pointer(self):
+        """The pointer the widgets should track (any non-stick contact)."""
+        for f in self.fingers.values():
+            if f['role'] == 'ui':
+                return f['pos']
+        return None
 
     # ── one frame of input ─────────────────────────────────────────────
     def gather(self):
@@ -91,42 +144,38 @@ class App:
                 return None
             elif ev.type == pygame.VIDEORESIZE:
                 self.win = pygame.display.set_mode((ev.w, ev.h), pygame.RESIZABLE)
-                self.dest = self._dest()
+                self.fit()
             elif ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
                     inp.back = True
                 elif ev.key == pygame.K_F3:
                     inp.toggle_debug = True
                 elif ev.key == pygame.K_F11:
-                    self.toggle_fullscreen()
+                    self.g.cfg.toggle('fullscreen')
+                    self.apply_video()
                 elif ev.key in (pygame.K_e, pygame.K_RETURN):
                     inp.action = True
                 elif ev.key in (pygame.K_SPACE, pygame.K_j):
                     inp.attack = True
+            elif ev.type == pygame.MOUSEWHEEL:
+                self.wheel += ev.y
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-                p = self.to_virtual(ev.pos)
-                self.pointer = p
-                if self.in_circle(p, self.JOY):
-                    self.stick_drag = True
-                    self.set_stick(p)
-                elif self.in_circle(p, self.ATK):
-                    inp.attack = True
-                elif self.in_rect(p, self.ACT) and self.g.world and \
-                        self.g.world.prompt():
-                    inp.action = True
+                self.press('mouse', self.to_virtual(ev.pos), inp)
             elif ev.type == pygame.MOUSEMOTION and ev.buttons[0]:
-                p = self.to_virtual(ev.pos)
-                self.pointer = p
-                if self.stick_drag:
-                    self.set_stick(p)
+                self.move('mouse', self.to_virtual(ev.pos))
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
-                p = self.to_virtual(ev.pos)
-                if self.stick_drag:
-                    self.stick_drag = False
-                    self.g.stick = None
-                else:
-                    self.tap = p
-                self.pointer = None
+                self.release('mouse', self.to_virtual(ev.pos))
+            # ── multi-touch: stick and buttons can be held at the same time
+            elif ev.type == pygame.FINGERDOWN:
+                self.g.touch_seen = True
+                self.press(('t', ev.finger_id), self.finger_pos(ev), inp)
+            elif ev.type == pygame.FINGERMOTION:
+                self.move(('t', ev.finger_id), self.finger_pos(ev))
+            elif ev.type == pygame.FINGERUP:
+                self.release(('t', ev.finger_id), self.finger_pos(ev))
+            elif ev.type == pygame.APP_WILLENTERBACKGROUND:
+                self.g.st.save()
+                self.g.cfg.save()
 
         keys = pygame.key.get_pressed()
         mx = (keys[pygame.K_d] or keys[pygame.K_RIGHT]) - \
@@ -140,22 +189,19 @@ class App:
         if keys[pygame.K_SPACE] or keys[pygame.K_j]:
             inp.attack = True
         inp.tap = self.tap
-        inp.held = self.pointer
+        inp.held = self.ui_pointer()
+        inp.wheel = self.wheel
         self.tap = None
+        self.wheel = 0
         return inp
 
-    def set_stick(self, p):
-        dx = (p[0] - self.JOY[0]) / 22.0
-        dy = (p[1] - self.JOY[1]) / 22.0
-        n = (dx * dx + dy * dy) ** 0.5
-        if n > 1.0:
-            dx, dy = dx / n, dy / n
-        self.g.stick = (dx, dy) if n > 0.22 else None
+    def finger_pos(self, ev):
+        w, h = self.win.get_size()
+        return self.to_virtual((ev.x * w, ev.y * h))
 
     # ── loop ───────────────────────────────────────────────────────────
     def run(self):
-        running = True
-        while running:
+        while True:
             dt = min(0.1, self.clock.tick(60) / 1000.0)
             inp = self.gather()
             if inp is None:
@@ -166,12 +212,18 @@ class App:
             self.g.frame_ms.append((time.perf_counter() - t0) * 1000.0)
             del self.g.frame_ms[:-240]
             self.g.fps = self.clock.get_fps() or 60.0
+            if self.g.request_video:
+                self.apply_video()
 
             self.win.fill(COL['black'])
-            pygame.transform.scale(self.buf, self.dest.size, self.win.subsurface(self.dest))
+            ox, oy = self.g.shake_offset()
+            dest = self.dest.move(ox * self.scale, oy * self.scale)
+            pygame.transform.scale(self.buf, dest.size,
+                                   self.win.subsurface(dest.clip(self.win.get_rect())))
             pygame.display.flip()
         if self.g.world is not None:
             self.g.st.save()
+        self.g.cfg.save()
         pygame.quit()
 
 

@@ -7,7 +7,7 @@ this module knows about game rules.
 import pygame
 
 # Virtual resolution.  Portrait, phone-shaped.  Scaled up on present().
-VW, VH = 200, 356
+VW, VH = 224, 400
 
 # ── palette ────────────────────────────────────────────────────────────
 COL = {
@@ -102,6 +102,7 @@ F5 = {
     '>': [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
     '=': [0, 0, 0x1F, 0, 0x1F, 0, 0],
     '_': [0, 0, 0, 0, 0, 0, 0x1F],
+    '@': [0x0E, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0E],
     '[': [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
     ']': [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
 }
@@ -136,7 +137,8 @@ F4 = {
     '?': [0x6, 0x9, 0x2, 0x4, 0, 0x4],   '(': [0x2, 0x4, 0x4, 0x4, 0x4, 0x2],
     ')': [0x4, 0x2, 0x2, 0x2, 0x2, 0x4], '*': [0x9, 0x6, 0xF, 0x6, 0x9, 0],
     '#': [0xA, 0xF, 0xA, 0xF, 0xA, 0],   "'": [0x4, 0x4, 0, 0, 0, 0],
-    '_': [0, 0, 0, 0, 0, 0xF],           '[': [0x6, 0x4, 0x4, 0x4, 0x4, 0x6],
+    '_': [0, 0, 0, 0, 0, 0xF],           '@': [0x6, 0x9, 0xB, 0xB, 0x8, 0x7],
+    '[': [0x6, 0x4, 0x4, 0x4, 0x4, 0x6],
     ']': [0x6, 0x2, 0x2, 0x2, 0x2, 0x6],
 }
 
@@ -227,24 +229,3 @@ def bar(surf, x, y, w, h, frac, fg, bg='dirt0', edge='dirt3'):
     if fw > 0:
         rect(surf, x + 1, y + 1, fw, h - 2, COL[fg] if isinstance(fg, str) else fg)
     frame(surf, x, y, w, h, COL[edge] if isinstance(edge, str) else edge)
-
-
-def dither(surf, x, y, w, h, col, step=2):
-    """Checkerboard fill — cheap shading that stays pixel-crisp."""
-    x, y, w, h = int(x), int(y), int(w), int(h)
-    for yy in range(y, y + h):
-        for xx in range(x + (yy % step), x + w, step):
-            if 0 <= xx < surf.get_width() and 0 <= yy < surf.get_height():
-                surf.set_at((xx, yy), col)
-
-
-def vignette(surf, strength=90):
-    """Darken the edges of the frame."""
-    w, h = surf.get_size()
-    band = pygame.Surface((w, h), pygame.SRCALPHA)
-    steps = 10
-    for i in range(steps):
-        a = int(strength * (i + 1) / steps)
-        m = steps - i
-        pygame.draw.rect(band, (0, 0, 0, a // steps + 1), (m, m, w - 2 * m, h - 2 * m), 1)
-    surf.blit(band, (0, 0))
