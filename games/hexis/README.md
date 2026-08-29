@@ -1,4 +1,4 @@
-# HEXIS 3.0 — "Stormbreak"
+# HEXIS 3.1 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -138,6 +138,97 @@ every archetype and the Architect on the field and no errors.
 
 ---
 
+## 3.1 — models, surfaces, and Part One
+
+### The models
+
+Every character was a stack of `plate()` calls, and `plate()` is a rounded
+box. A forearm was a box. A thigh was a box. A head was a box with a smaller
+box for a face. At three metres — where the third-person camera actually sits
+— you were looking at the seams, and at the gap that opens at every elbow the
+moment the joint bends past forty degrees.
+
+`src/350-model.js` replaces them. **Revolve, don't stack:**
+
+- Almost everything on a body is a surface of revolution with a squashed
+  cross-section — upper arm, forearm, calf, neck, torso, skull. `LatheGeometry`
+  spins a profile, which gives smooth tapered limbs with no seams, correct
+  smooth-shaded normals, and real UVs for the textures to land on.
+- **A ball at every joint.** A sphere at the shoulder, elbow and knee keeps
+  the joint solid at any bend angle. That is the actual fix for the gap, and
+  it is what a real character rig does with skinning.
+- **Stylised proportions**, in the Fortnite/Overwatch register: head at 1:6.2
+  of height rather than a realistic 1:7.5, broad shoulders tapering to a
+  narrow waist, limbs that thin from 0.115 to 0.075 down the forearm, and
+  deliberately oversized hands and feet.
+- **A real face**: revolved skull, chin, cheekbones, nose, ears, eyes set
+  *into* the skull rather than stuck on it, brows, a mouth line, a fitted
+  hair cap and a fringe that hangs. Plus a blink.
+- Open-front jacket with lapels and a stand collar, sleeve cuffs, knee pads
+  that wrap, flared boots with a sole and a toe cap, a chunky mitt hand with
+  a thumb, and a back unit whose vents flare on a dash.
+
+About 2,400 triangles a character against roughly 600 before, and *fewer*
+meshes — 53 against 89 — because the merge below now actually works.
+
+### The textures
+
+Up to 2.4.6 there was not one image in this game. `src/345-texture.js` adds
+nine, drawn into canvases at load and shared — under 3 MB of VRAM against the
+16 MB one 2048px PBR set would cost. Fabric, denim, leather, brushed panel,
+skin, concrete, rust, hazard stripes, and a lit window sheet.
+
+Two delivery paths, because the two kinds of geometry have different needs:
+
+- **Characters** have real UVs, so the maps go on as `map` / `normalMap` /
+  `roughnessMap`.
+- **Statics** are one merged mesh per material with no useful UVs, so they are
+  sampled **triplanar** in the existing shader off `vWPos`. Dominant axis
+  only — one texture fetch, not three. Blending is the textbook version and it
+  is two extra dependent reads on every covered pixel, for a seam nobody can
+  find on a noise texture.
+
+Both drop out entirely below a 0.66 quality scale, which is the next thing to
+give up after the scaler has finished trading pixels.
+
+### Part One
+
+`src/370-lore.js` makes the game agree with the comic.
+
+**The Regulator.** The best thing in the source material, and it was already a
+mechanic in everything but name — *"It's not what gives you your powers. It
+does the opposite."* So it is a real, removable item with numbers on both
+sides. Worn: capped charge, ordinary damage, total stability. Off (`J`, or a
+row in Settings): **+60% damage, +50% charge, +35% regen** — and a Rage meter
+that fills on every hit you take and every kill you land.
+
+**Blackout.** Fill the meter and you are not driving any more. *"He grew
+taller. His skin turned completely black. Large claws formed on his hands, and
+blue flames erupted around his fists."* All of that, plus 2.6× damage, 45%
+more damage taken, no healing, and four seconds on your knees when it ends.
+
+**The cast, to spec.** Kell rebuilt at seven feet in deep light-absorbing
+purple with red eyes and ancient armour covered in a generated script that
+tiles without repeating. Rex given his long shimmering coat. The **Response
+Team** — Flare, Phantom, Brick, Specter, Ace and Commander Pierce — built as
+real characters with their own palettes, who fight beside you badly, because
+that is the point of them before they learn to work together. The hostiles are
+the Syndicate now.
+
+**The book.** Ten codex entries from Part One, unlocked against the story
+flags the jobs already set, in a new tab in the pause menu.
+
+### More bugs
+
+| | Symptom |
+|---|---|
+| **The character merge never merged anything** | `RigOpt.collapse` — the headline of the 2.4.2 pass, credited with taking a character from 89 draw submissions to a handful — reported `merged: 0` on the shipping build. `protect()` walks the rig for named references, finds `rig.j`, descends into it, and marks `j.hips` **with its entire subtree**. Every part of a character is under hips, so the protected set was the whole rig and nothing could ever merge. Only `shadows()` was doing anything. Fixed, and a grunt went from 130 meshes to 53. |
+| **Merging dropped UVs** | `mergeGeos` copied position and normal only. Harmless when nothing had a texture; with 3.1 it would have silently undone the entire surface pass on every merged part. |
+| **The new sculptor had the same bug** | Written from the same walk, so the strip removed nothing and the new geometry was added *on top of* the old — the character wore both models at once. The white slab where the face should be was the original box mask, in front of the new head the whole time. |
+| **Textures blew bright albedo out to white** | three multiplies `map` by `color`, so a greyscale map darkens the material; compensating by 1.9 clips anything bright. Skin at `#e8b988` is 0.91 in red. Every face rendered as a blank white panel. Textures are now normalised to a known mean and the compensation is clamped per channel. |
+
+---
+
 ## Testing
 
 There is no test harness in the repo — the game is the test — but everything
@@ -165,8 +256,10 @@ games/hexis/
     320-jobs.js       mission framework + 9 jobs
     330-acts.js       Acts II/III, board, travel, the Architect, the ending
     340-qol.js        pause, log, codex, checkpoints, options
-    350-model.js      model and animation pass
-    360-perf.js       allocation pass, body budget
+    345-texture.js    procedural textures — nine maps, no downloaded bytes
+    350-model.js      the character sculptor: revolved limbs, real faces
+    360-perf.js       allocation pass, body budget, the rig-merge fix
+    370-lore.js       Part One: the Regulator, Blackout, the cast, the codex
   stormlink/          the multiplayer build — see its own README
 ```
 

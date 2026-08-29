@@ -128,6 +128,7 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
     '<button data-a="resume">Resume</button>' +
     '<button data-a="log" class="on">Job log</button>' +
     '<button data-a="codex">Codex</button>' +
+    '<button data-a="lore">Part One</button>' +
     '<button data-a="stats">Record</button>' +
     '<button data-a="board">The board</button>' +
     '<button data-a="skills">Skills</button>' +
@@ -226,6 +227,7 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
     b.innerHTML = '';
     if (tab === 'log') paintLog(b);
     else if (tab === 'codex') paintCodex(b);
+    else if (tab === 'lore') paintLore(b);
     else paintStats(b);
   }
 
@@ -268,6 +270,33 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
     }
     if (!any) kv.innerHTML = '<span>Nothing yet</span><b>—</b>';
     b.appendChild(kv);
+  }
+
+  /* Part One. Entries unlock against the same story flags the jobs set, so
+     the book fills in as you play it rather than arriving whole. 370-lore.js
+     owns the text; this only renders whatever it says is unlocked. */
+  function paintLore(b) {
+    b.appendChild(el('h3', null, 'Hexis · Part One'));
+    if (!g.loreEntries) {
+      b.appendChild(el('div', 'card', '<div class="n">Not loaded</div>'));
+      return;
+    }
+    const open = g.loreEntries();
+    const all = (typeof LORE !== 'undefined') ? LORE.entries : [];
+    for (const e of all) {
+      const known = open.indexOf(e) >= 0;
+      b.appendChild(el('div', 'card' + (known ? '' : ' locked'),
+        '<div class="n">' + (known ? e.title : '· · ·') + '</div>' +
+        '<div class="d">' + (known ? e.text : 'Not yet.') + '</div>'));
+    }
+    b.appendChild(el('h3', null, 'Where you came from'));
+    b.appendChild(el('div', 'card',
+      '<div class="n">Status</div><div class="d">' +
+      'Regulator: <b>' + (g.jacketOn ? 'worn' : 'off') + '</b>. ' +
+      (g.flags.seen_blackout ? 'Blackout: seen. ' : '') +
+      (g.flags.met_team ? 'Response Team: met. ' : '') +
+      (g.flags.act3_done ? 'The hub: reached.' : '') +
+      '</div>'));
   }
 
   function paintCodex(b) {

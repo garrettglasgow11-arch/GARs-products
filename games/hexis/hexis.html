@@ -21989,6 +21989,7 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
     '<button data-a="resume">Resume</button>' +
     '<button data-a="log" class="on">Job log</button>' +
     '<button data-a="codex">Codex</button>' +
+    '<button data-a="lore">Part One</button>' +
     '<button data-a="stats">Record</button>' +
     '<button data-a="board">The board</button>' +
     '<button data-a="skills">Skills</button>' +
@@ -22087,6 +22088,7 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
     b.innerHTML = '';
     if (tab === 'log') paintLog(b);
     else if (tab === 'codex') paintCodex(b);
+    else if (tab === 'lore') paintLore(b);
     else paintStats(b);
   }
 
@@ -22129,6 +22131,33 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
     }
     if (!any) kv.innerHTML = '<span>Nothing yet</span><b>—</b>';
     b.appendChild(kv);
+  }
+
+  /* Part One. Entries unlock against the same story flags the jobs set, so
+     the book fills in as you play it rather than arriving whole. 370-lore.js
+     owns the text; this only renders whatever it says is unlocked. */
+  function paintLore(b) {
+    b.appendChild(el('h3', null, 'Hexis · Part One'));
+    if (!g.loreEntries) {
+      b.appendChild(el('div', 'card', '<div class="n">Not loaded</div>'));
+      return;
+    }
+    const open = g.loreEntries();
+    const all = (typeof LORE !== 'undefined') ? LORE.entries : [];
+    for (const e of all) {
+      const known = open.indexOf(e) >= 0;
+      b.appendChild(el('div', 'card' + (known ? '' : ' locked'),
+        '<div class="n">' + (known ? e.title : '· · ·') + '</div>' +
+        '<div class="d">' + (known ? e.text : 'Not yet.') + '</div>'));
+    }
+    b.appendChild(el('h3', null, 'Where you came from'));
+    b.appendChild(el('div', 'card',
+      '<div class="n">Status</div><div class="d">' +
+      'Regulator: <b>' + (g.jacketOn ? 'worn' : 'off') + '</b>. ' +
+      (g.flags.seen_blackout ? 'Blackout: seen. ' : '') +
+      (g.flags.met_team ? 'Response Team: met. ' : '') +
+      (g.flags.act3_done ? 'The hub: reached.' : '') +
+      '</div>'));
   }
 
   function paintCodex(b) {
@@ -22404,45 +22433,688 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
   console.log('[hexis 3.0] qol online:', done.join(', '));
 })();
 
-/* ===== 350-model.js =======================================================
-   HEXIS 3.0 — model pass.
+/* ===== 345-texture.js =====================================================
+   HEXIS 3.1 — surfaces.
 
-   The 2.4 rigs are good silhouettes made of static plates. Everything that
-   moves on them is a joint; nothing on them is soft. From behind — which is
-   where the camera lives for the entire game — a character is a column of
-   boxes with no secondary motion at all, so a sprint at 17 m/s reads exactly
-   like a walk.
+   Up to 2.4.6 there is not one image in this game. Statics are vertex-coloured
+   boxes with procedural detail injected into the shader — panel lines, contact
+   AO, a wet sheen — and characters are flat-coloured `MeshStandardMaterial`.
+   That is why everything reads as *painted*: a concrete wall, a denim jacket
+   and a steel shutter are all the same perfectly smooth surface with a
+   different hex value on it.
 
-   Four additions, in the order they matter from the default camera:
+   This adds real textures without adding a single downloaded byte. Every map
+   here is drawn into a canvas at load, once, and shared. The whole library is
+   nine 256px textures plus their derived normal maps — under 3 MB of VRAM,
+   against the 16 MB one 2048px PBR set would cost.
 
-     COAT     a three-segment tail on the hips, driven by the rig's own frame
-              velocity and by gravity. This is the whole "he is moving fast"
-              read, and it costs six groups and a spring per segment.
-     VENTS    a back unit with two emitters that open on a dash and flare with
-              charge, so the power has somewhere to come out of.
-     PLATING  layered pauldrons, knee guards, forearm fins and a neck seal —
-              static, so they merge into the existing collapse pass and cost
-              nothing at all after the first frame.
-     RANK     a chevron on every hostile, coloured by tier. This is a
-              readability change more than an art one: in a crowd of nine you
-              need to know which two are the Brutes before they wind up.
+   Two delivery paths, because the two kinds of geometry have different needs:
 
-   WHERE THIS RUNS, AND WHY IT MATTERS
-   80-perf.js merges each joint's decorative plates into one mesh per material
-   on the rig's first update, and freezes their matrices. Anything added after
-   that runs loose and unfrozen — dozens of extra draw calls per character.
-   So this installs with Hook.before, which puts it at the *front* of the
-   update chain and therefore ahead of both the 60-upgrade detail pass and the
-   merge. Static plates added here get merged; the coat and the vents are
-   held as named properties on the rig, which is exactly what RigOpt.protect
-   looks for, so they are left animatable.
+     characters   real UVs (every plate comes from a BoxGeometry), so the maps
+                  go on as `map` / `normalMap` / `roughnessMap` and three does
+                  the rest.
+     statics      one merged mesh per material with world-scale geometry and
+                  no useful UVs. Sampled TRIPLANAR in the existing static
+                  shader off `vWPos`, which is already a varying there.
+
+   The triplanar path picks the dominant axis and takes ONE sample rather than
+   blending three. Blending is the textbook version and it is three texture
+   fetches on every covered pixel — on a phone, at full screen coverage, that
+   is the most expensive thing in the frame. The seam a single sample leaves
+   at exactly 45 degrees is invisible on a noise-driven texture, and the
+   saving is two thirds of the cost.
    ========================================================================= */
 
-const Model3 = {
-  /* Distance past which the coat stops solving and simply hangs. Beyond ~28 m
-     a 0.3 m panel swings by less than a pixel. */
-  coatFar: 28 * 28,
-  built: 0
+const Tex = {
+  size: 256,
+  cache: new Map(),
+  /* Off below this quality scale. The scaler already trades pixels for frame
+     rate; on a device that has run out of both, the texture fetch is the next
+     thing to give up. */
+  minQuality: 0.66,
+  enabled: true,
+
+  /* --- canvas plumbing -------------------------------------------------- */
+  canvas(size) {
+    const c = document.createElement('canvas');
+    c.width = c.height = size || this.size;
+    return c;
+  },
+
+  /* Value noise on a canvas, tileable by construction: the lattice wraps, so
+     the right edge is the left edge and there is no visible repeat seam. */
+  noiseInto(ctx, size, cells, octaves, alpha) {
+    const img = ctx.createImageData(size, size);
+    const grid = [];
+    for (let o = 0; o < octaves; o++) {
+      const n = cells << o;
+      const g = new Float32Array(n * n);
+      for (let i = 0; i < g.length; i++) g[i] = Math.random();
+      grid.push({ n, g });
+    }
+    const smooth = (t) => t * t * (3 - 2 * t);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        let v = 0, amp = 1, total = 0;
+        for (const { n, g } of grid) {
+          const fx = x / size * n, fy = y / size * n;
+          const x0 = Math.floor(fx), y0 = Math.floor(fy);
+          const tx = smooth(fx - x0), ty = smooth(fy - y0);
+          // Wrap the lattice so the texture tiles.
+          const i00 = (y0 % n) * n + (x0 % n);
+          const i10 = (y0 % n) * n + ((x0 + 1) % n);
+          const i01 = ((y0 + 1) % n) * n + (x0 % n);
+          const i11 = ((y0 + 1) % n) * n + ((x0 + 1) % n);
+          const a = g[i00] + (g[i10] - g[i00]) * tx;
+          const b = g[i01] + (g[i11] - g[i01]) * tx;
+          v += (a + (b - a) * ty) * amp;
+          total += amp;
+          amp *= 0.5;
+        }
+        v /= total;
+        const k = (y * size + x) * 4;
+        const c = Math.round(v * 255);
+        img.data[k] = img.data[k + 1] = img.data[k + 2] = c;
+        img.data[k + 3] = alpha === undefined ? 255 : alpha;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  },
+
+  /* A texture from a draw function, cached by key. */
+  make(key, draw, opts = {}) {
+    if (this.cache.has(key)) return this.cache.get(key);
+    const size = opts.size || this.size;
+    const c = this.canvas(size);
+    const x = c.getContext('2d');
+    draw(x, size);
+    /* Normalise the mean.
+
+       three multiplies `map` by `color`, so a greyscale albedo darkens
+       whatever colour the material had. The obvious compensation — scale the
+       colour back up by 1/mean — blows out any bright albedo: skin at
+       #e8b988 is 0.91 in red, and 0.91 * 1.9 clips to white. That is exactly
+       what happened, and it turned every face into a blank white slab.
+
+       Normalising the texture to a known, high mean bounds the compensation
+       to about 1.18, which no sensible albedo clips at. The texture still
+       carries all of its contrast; it just sits near white instead of near
+       mid grey. */
+    const TARGET = 0.85;
+    try {
+      const img = x.getImageData(0, 0, size, size);
+      let sum = 0;
+      for (let i = 0; i < img.data.length; i += 4) sum += img.data[i];
+      const mean = (sum / (img.data.length / 4)) / 255;
+      if (mean > 0.02 && !opts.keepLevels) {
+        const k = TARGET / mean;
+        for (let i = 0; i < img.data.length; i += 4) {
+          img.data[i] = Math.min(255, img.data[i] * k);
+          img.data[i + 1] = Math.min(255, img.data[i + 1] * k);
+          img.data[i + 2] = Math.min(255, img.data[i + 2] * k);
+        }
+        x.putImageData(img, 0, 0);
+      }
+    } catch (e) { /* tainted canvas is impossible here, but never fatal */ }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    // Mipmaps are not optional here: a fabric weave on a character at 30 m
+    // without them is a crawling moiré that reads as broken rendering.
+    t.generateMipmaps = true;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.anisotropy = opts.aniso || 4;
+    if (opts.repeat) t.repeat.set(opts.repeat[0], opts.repeat[1]);
+    t.needsUpdate = true;
+    t.userData = { canvas: c, key };
+    this.cache.set(key, t);
+    return t;
+  },
+
+  /* Height -> normal, by central difference on the source canvas. Cheaper and
+     more predictable than authoring a normal map by hand, and it means every
+     surface's bump automatically matches its own albedo. */
+  normalFrom(tex, strength = 1.4, key) {
+    const k = (key || tex.userData.key) + ':n';
+    if (this.cache.has(k)) return this.cache.get(k);
+    const src = tex.userData.canvas;
+    const size = src.width;
+    const sctx = src.getContext('2d');
+    const sd = sctx.getImageData(0, 0, size, size).data;
+    const c = this.canvas(size);
+    const x = c.getContext('2d');
+    const img = x.createImageData(size, size);
+    const at = (i, j) => sd[(((j + size) % size) * size + ((i + size) % size)) * 4] / 255;
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        const dx = (at(i + 1, j) - at(i - 1, j)) * strength;
+        const dy = (at(i, j + 1) - at(i, j - 1)) * strength;
+        // Normalise (-dx, -dy, 1) into 0..1 tangent space.
+        const len = Math.sqrt(dx * dx + dy * dy + 1);
+        const o = (j * size + i) * 4;
+        img.data[o] = Math.round((-dx / len * 0.5 + 0.5) * 255);
+        img.data[o + 1] = Math.round((-dy / len * 0.5 + 0.5) * 255);
+        img.data[o + 2] = Math.round((1 / len * 0.5 + 0.5) * 255);
+        img.data[o + 3] = 255;
+      }
+    }
+    x.putImageData(img, 0, 0);
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.generateMipmaps = true;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.needsUpdate = true;
+    t.userData = { canvas: c, key: k };
+    this.cache.set(k, t);
+    return t;
+  },
+
+  /* --- the library -------------------------------------------------------
+     Every one of these is greyscale. Colour comes from the material, so one
+     texture serves a navy jacket, an ox-blood jacket and a grey one. */
+
+  // Woven cloth: two perpendicular thread runs with a slub in each.
+  fabric() {
+    return this.make('fabric', (x, s) => {
+      x.fillStyle = '#808080'; x.fillRect(0, 0, s, s);
+      const step = 4;
+      for (let i = 0; i < s; i += step) {
+        x.fillStyle = 'rgba(255,255,255,0.10)';
+        x.fillRect(i, 0, 2, s);
+        x.fillStyle = 'rgba(0,0,0,0.10)';
+        x.fillRect(0, i, s, 2);
+      }
+      // Slubs: the irregular thick threads that stop a weave reading as graph
+      // paper.
+      for (let i = 0; i < 220; i++) {
+        x.fillStyle = 'rgba(0,0,0,' + (0.05 + Math.random() * 0.08) + ')';
+        const horiz = Math.random() < 0.5;
+        const len = 6 + Math.random() * 26;
+        if (horiz) x.fillRect(Math.random() * s, Math.random() * s, len, 2);
+        else x.fillRect(Math.random() * s, Math.random() * s, 2, len);
+      }
+      x.globalAlpha = 0.35;
+      const n = this.canvas(s), nx = n.getContext('2d');
+      this.noiseInto(nx, s, 16, 3);
+      x.drawImage(n, 0, 0);
+      x.globalAlpha = 1;
+    });
+  },
+
+  // Denim: a diagonal twill, which is the single detail that makes a jacket
+  // read as denim rather than as blue cloth.
+  denim() {
+    return this.make('denim', (x, s) => {
+      x.fillStyle = '#7a7a7a'; x.fillRect(0, 0, s, s);
+      x.lineWidth = 2;
+      for (let i = -s; i < s * 2; i += 5) {
+        x.strokeStyle = 'rgba(255,255,255,0.13)';
+        x.beginPath(); x.moveTo(i, 0); x.lineTo(i + s, s); x.stroke();
+        x.strokeStyle = 'rgba(0,0,0,0.10)';
+        x.beginPath(); x.moveTo(i + 2, 0); x.lineTo(i + 2 + s, s); x.stroke();
+      }
+      for (let i = 0; i < 900; i++) {
+        x.fillStyle = 'rgba(255,255,255,' + (Math.random() * 0.14) + ')';
+        x.fillRect(Math.random() * s, Math.random() * s, 1, 1);
+      }
+      x.globalAlpha = 0.28;
+      const n = this.canvas(s), nx = n.getContext('2d');
+      this.noiseInto(nx, s, 8, 3);
+      x.drawImage(n, 0, 0);
+      x.globalAlpha = 1;
+    });
+  },
+
+  // Leather: a cell pattern, worn brighter on the raised parts.
+  leather() {
+    return this.make('leather', (x, s) => {
+      x.fillStyle = '#6e6e6e'; x.fillRect(0, 0, s, s);
+      // Scatter points, then draw a soft blob at each: cheap Voronoi-ish grain.
+      for (let i = 0; i < 420; i++) {
+        const px = Math.random() * s, py = Math.random() * s;
+        const r = 3 + Math.random() * 7;
+        const g = x.createRadialGradient(px, py, 0, px, py, r);
+        g.addColorStop(0, 'rgba(255,255,255,0.16)');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        x.fillStyle = g;
+        x.beginPath(); x.arc(px, py, r, 0, Math.PI * 2); x.fill();
+      }
+      for (let i = 0; i < 260; i++) {
+        const px = Math.random() * s, py = Math.random() * s;
+        x.strokeStyle = 'rgba(0,0,0,0.12)';
+        x.lineWidth = 1;
+        x.beginPath();
+        x.arc(px, py, 3 + Math.random() * 8, Math.random() * 6, Math.random() * 6 + 1);
+        x.stroke();
+      }
+    });
+  },
+
+  // Brushed metal panel with a seam grid and rivets.
+  panel() {
+    return this.make('panel', (x, s) => {
+      x.fillStyle = '#8a8a8a'; x.fillRect(0, 0, s, s);
+      for (let i = 0; i < 1400; i++) {
+        x.fillStyle = 'rgba(255,255,255,' + (Math.random() * 0.10) + ')';
+        x.fillRect(Math.random() * s, Math.random() * s, 2 + Math.random() * 20, 1);
+      }
+      const half = s / 2;
+      x.strokeStyle = 'rgba(0,0,0,0.45)'; x.lineWidth = 2;
+      x.strokeRect(1, 1, half - 2, s - 2);
+      x.strokeRect(half + 1, 1, half - 2, s - 2);
+      x.strokeStyle = 'rgba(255,255,255,0.18)'; x.lineWidth = 1;
+      x.strokeRect(3, 3, half - 6, s - 6);
+      x.strokeRect(half + 3, 3, half - 6, s - 6);
+      for (const [rx, ry] of [[10, 10], [half - 10, 10], [10, s - 10], [half - 10, s - 10],
+                              [half + 10, 10], [s - 10, 10], [half + 10, s - 10], [s - 10, s - 10]]) {
+        const g = x.createRadialGradient(rx, ry - 1, 0, rx, ry, 4);
+        g.addColorStop(0, 'rgba(255,255,255,0.5)');
+        g.addColorStop(1, 'rgba(0,0,0,0.35)');
+        x.fillStyle = g;
+        x.beginPath(); x.arc(rx, ry, 4, 0, Math.PI * 2); x.fill();
+      }
+    });
+  },
+
+  // Skin: fine pores plus a very low-frequency mottle, so a face is not one
+  // flat colour under a hard light.
+  skin() {
+    return this.make('skin', (x, s) => {
+      x.fillStyle = '#9a9a9a'; x.fillRect(0, 0, s, s);
+      const n = this.canvas(s), nx = n.getContext('2d');
+      this.noiseInto(nx, s, 4, 2);
+      x.globalAlpha = 0.22; x.drawImage(n, 0, 0); x.globalAlpha = 1;
+      for (let i = 0; i < 2600; i++) {
+        x.fillStyle = 'rgba(0,0,0,' + (0.02 + Math.random() * 0.05) + ')';
+        x.beginPath();
+        x.arc(Math.random() * s, Math.random() * s, 0.6 + Math.random() * 0.9, 0, Math.PI * 2);
+        x.fill();
+      }
+    }, { size: 128 });
+  },
+
+  // Poured concrete: aggregate, form-board lines and staining.
+  concrete() {
+    return this.make('concrete', (x, s) => {
+      x.fillStyle = '#8f8f8f'; x.fillRect(0, 0, s, s);
+      const n = this.canvas(s), nx = n.getContext('2d');
+      this.noiseInto(nx, s, 6, 4);
+      x.globalAlpha = 0.5; x.drawImage(n, 0, 0); x.globalAlpha = 1;
+      for (let i = 0; i < 900; i++) {
+        const r = 1 + Math.random() * 3;
+        x.fillStyle = Math.random() < 0.5
+          ? 'rgba(255,255,255,' + (Math.random() * 0.18) + ')'
+          : 'rgba(0,0,0,' + (Math.random() * 0.18) + ')';
+        x.beginPath(); x.arc(Math.random() * s, Math.random() * s, r, 0, Math.PI * 2); x.fill();
+      }
+      // Form-board seams, so a wall has a construction method.
+      x.fillStyle = 'rgba(0,0,0,0.18)';
+      for (let i = 0; i < s; i += 64) x.fillRect(0, i, s, 2);
+      // Streaks under the seams — where water runs.
+      for (let i = 0; i < 40; i++) {
+        const px = Math.random() * s, py = Math.floor(Math.random() * 4) * 64;
+        const g = x.createLinearGradient(0, py, 0, py + 40);
+        g.addColorStop(0, 'rgba(0,0,0,0.16)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        x.fillStyle = g;
+        x.fillRect(px, py, 3 + Math.random() * 8, 40);
+      }
+    });
+  },
+
+  // Rusted plate, for the Undercity and the Foundry.
+  rust() {
+    return this.make('rust', (x, s) => {
+      x.fillStyle = '#7d7d7d'; x.fillRect(0, 0, s, s);
+      const n = this.canvas(s), nx = n.getContext('2d');
+      this.noiseInto(nx, s, 5, 4);
+      x.globalAlpha = 0.65; x.drawImage(n, 0, 0); x.globalAlpha = 1;
+      for (let i = 0; i < 150; i++) {
+        const px = Math.random() * s, py = Math.random() * s, r = 4 + Math.random() * 22;
+        const g = x.createRadialGradient(px, py, 0, px, py, r);
+        g.addColorStop(0, 'rgba(255,255,255,0.30)');
+        g.addColorStop(0.6, 'rgba(120,120,120,0.16)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        x.fillStyle = g;
+        x.beginPath(); x.arc(px, py, r, 0, Math.PI * 2); x.fill();
+      }
+    });
+  },
+
+  /* Windows: the one texture that is not greyscale, because a tower face is
+     mostly window and the lit/dark pattern IS the building. Emissive, drawn
+     with a few colour temperatures so a skyline is not one shade of blue. */
+  windows() {
+    return this.make('windows', (x, s) => {
+      x.fillStyle = '#0a0e16'; x.fillRect(0, 0, s, s);
+      const cols = 8, rows = 12;
+      const cw = s / cols, ch = s / rows;
+      const lit = ['#cfe6ff', '#9fc4ff', '#ffd9a0', '#7fd8ff', '#ffb37a'];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const px = c * cw + 2, py = r * ch + 2, w = cw - 4, h = ch - 5;
+          x.fillStyle = '#131a26';
+          x.fillRect(px, py, w, h);
+          if (Math.random() < 0.42) {
+            const col = lit[(Math.random() * lit.length) | 0];
+            x.globalAlpha = 0.35 + Math.random() * 0.6;
+            x.fillStyle = col;
+            x.fillRect(px, py, w, h);
+            // A silhouette in some of them. One dark rectangle is enough to
+            // suggest the floor is occupied.
+            if (Math.random() < 0.22) {
+              x.globalAlpha = 0.5;
+              x.fillStyle = '#05070c';
+              x.fillRect(px + w * (0.2 + Math.random() * 0.5), py + h * 0.35, w * 0.18, h * 0.65);
+            }
+            x.globalAlpha = 1;
+          }
+          x.strokeStyle = 'rgba(0,0,0,0.6)'; x.lineWidth = 1;
+          x.strokeRect(px, py, w, h);
+        }
+      }
+      // Floor slabs between the bands.
+      x.fillStyle = 'rgba(0,0,0,0.55)';
+      for (let r = 0; r < rows; r++) x.fillRect(0, r * ch, s, 3);
+    }, { keepLevels: true });
+  },
+
+  /* Hazard stripes, for the Foundry and anything the level wants to say
+     "do not stand here" about. */
+  hazard() {
+    return this.make('hazard', (x, s) => {
+      x.fillStyle = '#909090'; x.fillRect(0, 0, s, s);
+      x.strokeStyle = '#303030'; x.lineWidth = 18;
+      for (let i = -s; i < s * 2; i += 44) {
+        x.beginPath(); x.moveTo(i, 0); x.lineTo(i + s, s); x.stroke();
+      }
+      for (let i = 0; i < 500; i++) {
+        x.fillStyle = 'rgba(255,255,255,' + (Math.random() * 0.12) + ')';
+        x.fillRect(Math.random() * s, Math.random() * s, 2, 2);
+      }
+    });
+  },
+
+  /* --- application ------------------------------------------------------- */
+
+  /* Give a character material a full set. `kind` picks the texture; `scale`
+     is how many times it repeats across one plate. Plates are small, so the
+     repeat is what controls apparent thread size — not the texture's own
+     resolution. */
+  /* Repeat is a property of the Texture, not of the material, so a naive
+     implementation clones one per material — ten characters times four
+     materials times two maps is eighty GPU uploads of the same image. The
+     variant is cached by (kind, scale) instead: every rig that wants fabric
+     at 3x shares one texture object, and the upload happens once. */
+  variant(kind, scale) {
+    const key = kind + '@' + scale;
+    if (this.cache.has(key)) return this.cache.get(key);
+    const src = this[kind] ? this[kind]() : this.fabric();
+    const t = src.clone();
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(scale, scale);
+    t.userData = src.userData;
+    t.needsUpdate = true;
+    this.cache.set(key, t);
+    return t;
+  },
+  normalVariant(kind, scale, strength) {
+    const key = kind + '@' + scale + ':n';
+    if (this.cache.has(key)) return this.cache.get(key);
+    const base = this[kind] ? this[kind]() : this.fabric();
+    const src = this.normalFrom(base, strength);
+    const t = src.clone();
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(scale, scale);
+    t.userData = src.userData;
+    t.needsUpdate = true;
+    this.cache.set(key, t);
+    return t;
+  },
+
+  dress(mat, kind, scale = 2, bump = 1) {
+    if (!this.enabled || !mat || mat.__dressed) return mat;
+    mat.__dressed = kind;
+    const map = this.variant(kind, scale);
+    mat.map = map;
+    /* Compensate for the map darkening the albedo, but never past the point
+       where a channel clips. A bright skin tone can only take about 1.1x
+       before red saturates and the face renders white. */
+    if (mat.color) {
+      const c = mat.color;
+      const headroom = 1 / Math.max(0.001, Math.max(c.r, c.g, c.b));
+      c.multiplyScalar(Math.min(1 / 0.85, headroom));
+    }
+    if (bump > 0) {
+      mat.normalMap = this.normalVariant(kind, scale, 1.6 * bump);
+      mat.normalScale = new THREE.Vector2(0.7 * bump, 0.7 * bump);
+      // The albedo doubles as a roughness break-up: the raised threads on a
+      // weave are shinier than the valleys, which is true and free.
+      mat.roughnessMap = map;
+    }
+    mat.needsUpdate = true;
+    return mat;
+  }
+};
+
+(function texturePass() {
+  const g = window.HEXIS;
+  if (!g) return;
+  const done = [];
+  const step = (n, fn) => { try { fn(); done.push(n); } catch (e) { console.error('[tex] ' + n, e); } };
+
+  if (SAFE) { console.log('[hexis 3.1] textures skipped (safe mode)'); return; }
+
+  /* ------------------------------------------------------------- STATICS
+     One triplanar sample folded into the material the whole world already
+     uses. `vWPos` and `vWNrm` are existing varyings, so this costs a uniform,
+     a branch on the dominant axis and one texture fetch.
+
+     Two textures, picked per zone rather than per surface: a base for
+     everything, and an emissive window sheet that only lights the faces the
+     geometry has already marked as glowing. The zone builders tag glow with
+     a separate merged mesh, so "windows only on window geometry" needs no
+     per-vertex data at all — the glow mesh IS the window geometry. */
+  step('statics', () => {
+    const base = Tex.concrete();
+    const wnd = Tex.windows();
+    const baseNrm = Tex.normalFrom(base, 1.1);
+
+    const prev = makeStaticMaterial;
+    makeStaticMaterial = function (opts = {}) {
+      const m = prev(opts);
+      if (!m.userData.u) return m;
+      const u = m.userData.u;
+      u.uTex = { value: opts.glow ? wnd : base };
+      u.uTexNrm = { value: baseNrm };
+      u.uTexScale = { value: opts.texScale || 0.42 };
+      u.uTexAmt = { value: opts.texAmt === undefined ? 1 : opts.texAmt };
+
+      const prevCompile = m.onBeforeCompile;
+      m.onBeforeCompile = (sh) => {
+        prevCompile(sh);
+        Object.assign(sh.uniforms, u);
+        sh.fragmentShader =
+          'uniform sampler2D uTex;\nuniform sampler2D uTexNrm;\n' +
+          'uniform float uTexScale;\nuniform float uTexAmt;\n' +
+          sh.fragmentShader.replace(
+            '#include <specularmap_fragment>',
+            `{
+               if ( uTexAmt > 0.001 ) {
+                 // Dominant-axis triplanar. One fetch, not three: blending
+                 // costs 2 extra dependent reads on every covered pixel and
+                 // buys a seam nobody can find on a noise texture.
+                 vec3 an = abs( vWNrm );
+                 vec2 tuv;
+                 if ( an.y > max( an.x, an.z ) )      tuv = vWPos.xz;
+                 else if ( an.x > an.z )              tuv = vWPos.zy;
+                 else                                 tuv = vWPos.xy;
+                 tuv *= uTexScale;
+                 vec3 t = texture2D( uTex, tuv ).rgb;
+                 // Authored around mid grey, so this modulates rather than
+                 // replaces — the vertex colour still decides what it is.
+                 float fade = 1.0 - smoothstep( 40.0, 120.0, length( vViewPosition ) );
+                 diffuseColor.rgb *= mix( vec3( 1.0 ), t * 2.0, uTexAmt * fade );
+               }
+             }
+             #include <specularmap_fragment>`
+          );
+      };
+      const key = m.customProgramCacheKey;
+      m.customProgramCacheKey = () => (key ? key() : '') + '|tex' + (opts.glow ? 'W' : 'B');
+      return m;
+    };
+
+    // Quality LOD: the scaler already gives up pixels first; this is the next
+    // thing to drop, and it drops to nothing rather than to something blurry.
+    Hook.after(Game.prototype, 'applyQuality', function () {
+      if (!this.zone || !this.zone.group) return;
+      const want = this._q < Tex.minQuality ? 0 : 1;
+      this.zone.group.traverse(o => {
+        const u = o.material && o.material.userData && o.material.userData.u;
+        if (u && u.uTexAmt) u.uTexAmt.value = want;
+      });
+    }, 'tex31:staticLod');
+  });
+
+  /* ------------------------------------------------------------ CHARACTERS
+     BipedRig builds five materials per rig in its constructor. Rather than
+     rewrite that, dress them on the way out — the rig has just been built and
+     nothing has drawn with them yet. The mapping is by role, so an enemy in
+     armour and Hexis in a jacket get the surface each one should have. */
+  step('characters', () => {
+    const dressRig = (rig) => {
+      if (!rig || !rig.mats || rig.__tex) return;
+      rig.__tex = true;
+      const m = rig.mats;
+      // Cloth wants a weave, armour wants a panel, the under-suit wants a
+      // fine fabric, and the dark parts want leather.
+      Tex.dress(m.suit, 'fabric', 3, 0.9);
+      Tex.dress(m.cloth, 'denim', 2.2, 1.15);
+      // Panel tiles a seam grid and eight rivets per repeat. At 1.4 repeats
+      // per plate that put one enormous seam across every small piece of
+      // armour; at 4 it reads as brushed plate with fine hardware, which is
+      // what it is for.
+      Tex.dress(m.armor, 'panel', 4, 0.7);
+      Tex.dress(m.dark, 'leather', 2.4, 1.0);
+      // `trim` is MeshBasicMaterial and emissive by intent — a texture on it
+      // would only make the one self-lit element on the character dirty.
+    };
+    Hook.before(BipedRig.prototype, 'update', function () { dressRig(this); }, 'tex31:charDress');
+    if (g.rig) dressRig(g.rig);
+    Tex.dressRig = dressRig;
+  });
+
+  /* ------------------------------------------------------------------ SKIN
+     Faces are built from their own materials inside makeHexis rather than
+     from rig.mats, so they need naming individually. Worth it: the face is
+     the one surface the camera is ever close to. */
+  step('faces', () => {
+    Hook.after(Game.prototype, 'loadZone', function () {
+      const fp = this.rig && this.rig.faceParts;
+      if (!fp || fp.__tex) return;
+      fp.__tex = true;
+      Tex.dress(fp.skin, 'skin', 1.6, 0.55);
+      Tex.dress(fp.hairDark, 'fabric', 3.2, 1.3);
+      Tex.dress(fp.hairLit, 'fabric', 3.2, 1.3);
+    }, 'tex31:face');
+  });
+
+  /* ---------------------------------------------------------------- REPORT */
+  step('report', () => {
+    CLOCK.in(4, () => {
+      let bytes = 0;
+      for (const t of Tex.cache.values()) {
+        const c = t.userData.canvas;
+        bytes += c.width * c.height * 4 * 1.34;   // + mip chain
+      }
+      console.log('[hexis 3.1] textures: ' + Tex.cache.size + ' generated, ~' +
+        (bytes / 1048576).toFixed(1) + ' MB VRAM');
+    });
+  });
+
+  console.log('[hexis 3.1] textures online:', done.join(', '));
+})();
+
+/* ===== 350-model.js =======================================================
+   HEXIS 3.1 — the character sculptor.
+
+   THE PROBLEM
+
+   Every character in this game is a stack of `plate()` calls, and `plate()` is
+   a rounded box. That was a deliberate, sensible choice at 2.x — it is cheap,
+   it merges well, and a 24% bevel catches enough of a highlight that a
+   silhouette reads at twenty metres.
+
+   It also means every character is literally made of boxes. A forearm is a
+   box. A thigh is a box. A head is a box with a smaller box for a face. At the
+   distance the third-person camera actually sits — three to five metres — you
+   are looking at the seams between them, and no amount of bevel fixes the
+   fact that an elbow is two rectangular prisms meeting at a corner with a gap
+   that opens every time the joint bends past forty degrees.
+
+   THE APPROACH
+
+   Revolve, don't stack.
+
+   Almost everything on a body is a surface of revolution with a squashed
+   cross-section: an upper arm, a forearm, a calf, a neck, a torso, a skull.
+   `THREE.LatheGeometry` takes a 2D profile and spins it, which gives smooth
+   tapered limbs with no seams, correct smooth-shaded normals, and — because
+   Lathe emits proper UVs — somewhere for 345-texture's maps to land.
+
+   A ball at every joint is the other half of it. A sphere at the elbow, the
+   knee and the shoulder means the joint stays solid at any bend angle, which
+   is the actual fix for the gap. It is the same trick a real character rig
+   uses, done with geometry instead of skinning, and it costs three spheres.
+
+   PROPORTIONS — the "not so blocky" part
+
+   Stylised, in the Fortnite / Overwatch register rather than realistic:
+
+     head        1 : 6.2 of total height, against a realistic 1 : 7.5. A
+                 bigger head is what reads as a character rather than as a
+                 mannequin, and it is the single biggest lever there is.
+     shoulders   2.6 head-widths, tapering to a narrow waist — the classic
+                 stylised V. Silhouette first.
+     limbs       thick at the root, thin at the joint: 0.115 -> 0.075 down the
+                 forearm. Real limbs taper; boxes cannot.
+     hands/feet  deliberately oversized. Small hands on a stylised body look
+                 like a mistake; large ones look like a decision.
+
+   BUDGET
+
+   About 2,400 triangles a character against roughly 600 before. That sounds
+   like a lot until you notice the dressed city is 70,000 and that 80-perf.js
+   already merges every plate on a joint into one mesh per material and freezes
+   its matrix. Ten characters is 24k triangles and the same draw-call count as
+   before. Lathe segment count drops from 12 to 8 on touch, which is the only
+   concession made.
+
+   HOW IT INSTALLS
+
+   `Hook.before` on `BipedRig.update`, which puts it at the FRONT of the chain
+   — ahead of 60-upgrade's detail pass and ahead of 80-perf's merge, so the new
+   geometry is merged and frozen like everything else. The old plates are
+   removed first, and anything the animation code holds a named reference to
+   (the blade, the hex core, a Warden's shield, a Lancer's rifle) is left
+   exactly where it is.
+   ========================================================================= */
+
+const Sculpt = {
+  built: 0,
+  enabled: true,
+  /* Radial segments on every revolved part.
+     A lathe costs (points - 1) * segments * 2 triangles, so this number is
+     the single biggest lever on the character budget. Ten is where a forearm
+     stops reading as faceted at the distance the camera actually sits; seven
+     is where it stops on a phone screen. Going to twelve cost 40% more
+     triangles for a difference that needed photo mode to see. */
+  get seg() { return Input.touch ? 7 : 10; },
+  /* Joint balls get half the rings of a full sphere. They are only ever seen
+     as the round bit of an elbow. */
+  get ring() { return Input.touch ? 4 : 5; },
+  coatFar: 28 * 28
 };
 
 (function modelPass() {
@@ -22450,149 +23122,738 @@ const Model3 = {
   if (!g) return;
   const done = [];
   const step = (n, fn) => { try { fn(); done.push(n); } catch (e) { console.error('[model] ' + n, e); } };
+  const V2 = (x, y) => new THREE.Vector2(x, y);
 
-  /* --- construction ------------------------------------------------------- */
+  /* ======================================================================
+     PRIMITIVES
+     ====================================================================== */
 
-  /* BipedRig already builds a coat when cfg.coat is set: three chest-parented
-     groups, one panel and one hem strip each. It is not replaced here — a
-     second coat on top of the first is how the 2.4 title screen ended up with
-     two skylines. It is dressed: side flaps so the silhouette has a back and
-     two sides instead of one slab, and a wider lit hem on the last panel.
+  /* A surface of revolution from a profile of [radius, height] pairs, with an
+     optional depth squash so a cross-section can be an oval rather than a
+     circle — which is what a chest, a forearm and a skull all actually are. */
+  function lathe(profile, mat, opts = {}) {
+    const pts = profile.map(p => V2(Math.max(0.0001, p[0]), p[1]));
+    const geo = new THREE.LatheGeometry(pts, opts.seg || Sculpt.seg,
+      opts.phiStart || 0, opts.phiLength || Math.PI * 2);
+    if (opts.squash && opts.squash !== 1) geo.scale(1, 1, opts.squash);
+    if (opts.wide && opts.wide !== 1) geo.scale(opts.wide, 1, 1);
+    geo.computeVertexNormals();
+    const m = new THREE.Mesh(geo, mat);
+    if (opts.pos) m.position.set(opts.pos[0], opts.pos[1], opts.pos[2]);
+    if (opts.rot) m.rotation.set(opts.rot[0] || 0, opts.rot[1] || 0, opts.rot[2] || 0);
+    m.castShadow = true;
+    if (opts.side) m.material = mat;
+    return m;
+  }
 
-     Both additions are static relative to the group that owns them, so the
-     merge pass folds each group's cloth meshes into one — the coat comes out
-     of this with more shape and fewer draw calls than it went in with. */
-  function dressCoat(rig) {
-    if (!rig.coat || !rig.coat.length || rig.__coatDressed) return;
-    rig.__coatDressed = true;
-    const S = rig.S, m = rig.mats;
-    const w = [0.46, 0.44, 0.38], h = [0.32, 0.30, 0.26];
-    for (let i = 0; i < rig.coat.length; i++) {
-      const grp = rig.coat[i].g;
-      for (const side of [-1, 1]) {
-        const f = taper(w[i] * 0.44 * S, w[i] * 0.30 * S, h[i] * 0.94 * S, 0.07 * S, m.cloth,
-          side * w[i] * 0.47 * S, -h[i] * 0.48 * S, 0.012 * S);
-        f.rotation.y = side * 0.55;
-        f.rotation.z = side * -0.06;
-        grp.add(f);
+  /* A tapered limb: fat at the root, thin at the joint, with a rounded cap at
+     each end so it never shows a hard rim through a sleeve. Built root-down,
+     because that is how the rig hangs its joints. */
+  function limbGeo(rTop, rBot, len, mat, squash = 0.92) {
+    // Seven points, not ten. Each extra point costs `seg * 2` triangles on
+    // every limb of every character on screen, and the two it buys — a second
+    // ring in each end cap — are hidden inside the joint ball anyway.
+    const capT = rTop * 0.7, capB = rBot * 0.78;
+    const p = [
+      [0.0001, -len - capB],
+      [rBot * 0.80, -len - capB * 0.5],
+      [rBot, -len],
+      // A slight bulge two thirds up reads as muscle rather than as a cone.
+      [rBot + (rTop - rBot) * 0.5, -len * 0.5],
+      [rTop * 1.03, -len * 0.18],
+      [rTop, 0],
+      [rTop * 0.72, capT * 0.7],
+      [0.0001, capT]
+    ];
+    return lathe(p, mat, { squash });
+  }
+
+  /* A joint ball. This is the part that makes a bent elbow solid. */
+  function ball(r, mat, y = 0, squash = 1) {
+    const geo = new THREE.SphereGeometry(r, Sculpt.seg, Sculpt.ring);
+    if (squash !== 1) geo.scale(1, 1, squash);
+    const m = new THREE.Mesh(geo, mat);
+    m.position.y = y;
+    m.castShadow = true;
+    return m;
+  }
+
+  /* A soft box: the rounded-box primitive the base already has, but with a
+     heavier bevel so it sits next to revolved parts without looking like it
+     came from a different game. */
+  function soft(w, h, d, mat, x, y, z, k = 0.42) {
+    return plate(w, h, d, mat, x, y, z, k);
+  }
+
+  /* The same shape at one subdivision instead of two: 12 triangles against
+     48. Used for anything under about four centimetres, where the extra
+     subdivision is smaller than a pixel at any distance you will see it. */
+  function chip(w, h, d, mat, x, y, z, k = 0.35) {
+    const m = new THREE.Mesh(roundedBox(w, h, d, bev(w, h, d, k), 1), mat);
+    m.position.set(x, y, z);
+    m.castShadow = true;
+    return m;
+  }
+
+  /* ======================================================================
+     STRIP — remove what we are replacing, keep what the code holds on to
+     ====================================================================== */
+
+  /* Which objects must survive the strip.
+
+     This has the same trap RigOpt.protect fell into and 360-perf.js fixes:
+     a naive walk of the rig finds `rig.j`, descends into it, finds `j.head`
+     and marks it WITH ITS ENTIRE SUBTREE. Since every part of a character
+     hangs off a joint, that protects the whole rig — the strip removes
+     nothing and the new geometry is simply added on top of the old.
+
+     That is not a hypothetical: the first cut of this module shipped it, and
+     the result was a character wearing both models at once. The head kept its
+     original box skull, box faceplate and full-face white mask, which is
+     what the "flat white slab for a face" was — the sculpted head was behind
+     it the whole time.
+
+     So: joints are collected first and protected as NODES only. Everything
+     else the animation code holds by name keeps its whole subtree. */
+  function protectedSet(rig) {
+    const keep = new Set();
+    const joints = new Set();
+    const addJoint = (o) => { if (o && o.isObject3D) { joints.add(o); keep.add(o); } };
+    if (rig.j) for (const k in rig.j) addJoint(rig.j[k]);
+    for (const limb of [rig.armL, rig.armR, rig.legL, rig.legR]) {
+      if (!limb) continue;
+      for (const k in limb) addJoint(limb[k]);
+    }
+    if (rig.coat) for (const c of rig.coat) addJoint(c && c.g);
+    addJoint(rig.root);
+
+    const mark = (o) => { if (o && o.traverse) o.traverse(n => keep.add(n)); };
+    const scan = (obj, depth) => {
+      if (!obj || depth > 2) return;
+      for (const k in obj) {
+        const v = obj[k];
+        if (!v) continue;
+        if (v.isObject3D) {
+          if (k === 'root' || joints.has(v)) continue;
+          mark(v);
+        } else if (Array.isArray(v)) {
+          v.forEach(x => { if (x && x.isObject3D && !joints.has(x)) mark(x); });
+        } else if (typeof v === 'object' && !v.isMaterial && !v.isBufferGeometry &&
+                   !v.isVector3 && !v.isColor && !v.isTexture) {
+          scan(v, depth + 1);
+        }
       }
-      // A little weight at the bottom edge so the panel does not read as paper.
-      grp.add(plate(w[i] * 0.98 * S, 0.030 * S, 0.075 * S, m.cloth, 0, -h[i] * S + 0.015 * S, -0.01 * S));
-    }
-    // Per-segment spring state. Two axes, unlike the base's one.
-    rig.coatState = rig.coat.map(() => ({ x: 0, z: 0, vx: 0, vz: 0 }));
-    rig.coatPrev = new THREE.Vector3();
-    rig.root.getWorldPosition(rig.coatPrev);
-    rig.coatHas = true;
+    };
+    scan(rig, 0);
+    return keep;
   }
 
-  function buildVents(rig) {
-    const S = rig.S, m = rig.mats;
-    const pack = new THREE.Group();
-    pack.position.set(0, 0.36 * S, -0.17 * S);
-    pack.add(plate(0.34 * S, 0.30 * S, 0.11 * S, m.armor, 0, 0, 0));
-    pack.add(plate(0.38 * S, 0.05 * S, 0.13 * S, m.dark, 0, 0.16 * S, 0));
-    const cores = [];
-    for (const side of [-1, 1]) {
-      const nozzle = new THREE.Group();
-      nozzle.position.set(side * 0.13 * S, -0.02 * S, -0.06 * S);
-      nozzle.add(plate(0.10 * S, 0.16 * S, 0.10 * S, m.dark, 0, 0, 0));
-      const core = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.045 * S, 0.058 * S, 0.05 * S, 6),
-        new THREE.MeshBasicMaterial({
-          color: rig.cfg.trim, transparent: true, opacity: 0.9,
-          blending: THREE.AdditiveBlending, depthWrite: false, fog: false
-        }));
-      core.rotation.x = Math.PI / 2;
-      core.position.z = -0.08 * S;
-      nozzle.add(core);
-      pack.add(nozzle);
-      cores.push(core);
+  function strip(joint, keep) {
+    for (let i = joint.children.length - 1; i >= 0; i--) {
+      const c = joint.children[i];
+      if (!c.isMesh || keep.has(c)) continue;
+      joint.remove(c);
+      if (c.geometry) c.geometry.dispose();
     }
-    rig.j.chest.add(pack);
-    rig.ventPack = pack;
-    rig.ventCores = cores;               // array of Object3D — protected
   }
 
-  function buildPlating(rig) {
-    const S = rig.S, m = rig.mats;
-    // Layered pauldron caps. Static, merged, free after frame one.
-    for (const side of [-1, 1]) {
-      const sh = side < 0 ? rig.armL : rig.armR;
-      if (!sh || !sh.sh) continue;
-      sh.sh.add(plate(0.22 * S, 0.06 * S, 0.28 * S, m.armor, side * 0.055 * S, 0.115 * S, 0));
-      sh.sh.add(plate(0.17 * S, 0.05 * S, 0.22 * S, m.armor, side * 0.085 * S, 0.155 * S, 0));
-      sh.sh.add(plate(0.06 * S, 0.02 * S, 0.20 * S, m.trim, side * 0.10 * S, 0.175 * S, 0));
+  /* ======================================================================
+     THE BODY
+     ====================================================================== */
+
+  function sculpt(rig) {
+    const S = rig.S, m = rig.mats, cfg = rig.cfg, j = rig.j;
+    const keep = protectedSet(rig);
+    const face = !!cfg.face;
+    const heavy = !!cfg.heavy;
+    const slim = cfg.slim ? 0.86 : 1;
+
+    /* --- pelvis ------------------------------------------------------- */
+    strip(j.hips, keep);
+    j.hips.add(lathe([
+      [0.108 * S, -0.16 * S], [0.150 * S, -0.10 * S], [0.162 * S, 0.0],
+      [0.150 * S, 0.06 * S], [0.124 * S, 0.10 * S]
+    ], m.dark, { squash: 0.80, wide: heavy ? 1.12 : 1 }));
+    // Belt: a real band with a buckle, so the torso and the legs are two
+    // garments rather than one tube.
+    j.hips.add(lathe([
+      [0.162 * S, 0.02 * S], [0.174 * S, 0.05 * S], [0.174 * S, 0.10 * S], [0.162 * S, 0.13 * S]
+    ], m.armor, { squash: 0.82, wide: heavy ? 1.12 : 1 }));
+    j.hips.add(chip(0.09 * S, 0.068 * S, 0.045 * S, m.trim, 0, 0.075 * S, 0.132 * S, 0.3));
+
+    /* --- torso -------------------------------------------------------- */
+    strip(j.chest, keep);
+    const chestW = (heavy ? 1.16 : 1) * slim;
+    // The V: narrow at the waist, widest at the deltoid line, tucked back in
+    // at the collar. This profile is the whole stylised read.
+    /* Radii, not diameters. The base rig's ribcage plate is 0.42 S across and
+       its upper chest 0.48 S, so 0.21 S is the widest this can be without the
+       character reading as a barrel — which is exactly what the first cut of
+       this did. The V comes from the RATIO between waist and shoulder, not
+       from making the shoulder bigger. */
+    j.chest.add(lathe([
+      [0.128 * S, 0.02 * S],
+      [0.152 * S, 0.14 * S],
+      [0.184 * S, 0.28 * S],
+      [0.205 * S, 0.42 * S],
+      [0.206 * S, 0.52 * S],
+      [0.168 * S, 0.60 * S],
+      [0.100 * S, 0.655 * S]
+    ], m.suit, { squash: 0.72, wide: chestW }));
+
+    // Pectoral shelf and abdominal break — two shallow revolved bands rather
+    // than sculpted muscle. At this scale that is all the read needs.
+    j.chest.add(lathe([
+      [0.196 * S, 0.34 * S], [0.208 * S, 0.40 * S], [0.200 * S, 0.47 * S]
+    ], m.armor, { squash: 0.76, wide: chestW }));
+
+    /* --- the jacket ----------------------------------------------------
+       A partial revolve: `phiLength` short of a full turn leaves the front
+       open, which is how you get an open jacket out of a lathe. The lapels
+       and the collar are separate so they can flare. */
+    if (cfg.coat || cfg.jacket !== false) {
+      const open = 0.62;                       // radians of gap at the front
+      const jk = lathe([
+        [0.150 * S, -0.05 * S],
+        [0.178 * S, 0.08 * S],
+        [0.205 * S, 0.28 * S],
+        [0.222 * S, 0.44 * S],
+        [0.214 * S, 0.545 * S],
+        [0.160 * S, 0.60 * S]
+      ], m.cloth, {
+        squash: 0.74, wide: chestW,
+        phiStart: open / 2, phiLength: Math.PI * 2 - open
+      });
+      jk.material = m.cloth;
+      // Open geometry, so it has to be two-sided or you see through the back
+      // of the lapel every time the camera swings round.
+      jk.material.side = THREE.DoubleSide;
+      j.chest.add(jk);
+
+      // Lapels: tapered panels folded back off the opening.
+      for (const side of [-1, 1]) {
+        const lap = taper(0.105 * S, 0.045 * S, 0.38 * S, 0.045 * S, m.cloth,
+          side * 0.088 * S, 0.34 * S, 0.146 * S);
+        lap.rotation.z = side * 0.22;
+        lap.rotation.y = side * -0.42;
+        j.chest.add(lap);
+      }
+      // Stand collar, revolved and tipped outwards.
+      // A collar that reaches the jaw swallows the face. This stops at the
+      // base of the neck and only tips out at the very top.
+      const col = lathe([
+        [0.108 * S, 0.585 * S], [0.126 * S, 0.645 * S], [0.134 * S, 0.688 * S]
+      ], m.cloth, { squash: 0.86, phiStart: 0.5, phiLength: Math.PI * 2 - 1.0 });
+      col.material.side = THREE.DoubleSide;
+      j.chest.add(col);
     }
-    // Knee guards and shin fins.
-    for (const side of ['L', 'R']) {
-      const leg = side === 'L' ? rig.legL : rig.legR;
-      if (!leg || !leg.kn) continue;
-      leg.kn.add(plate(0.155 * S, 0.13 * S, 0.16 * S, m.armor, 0, -0.02 * S, 0.05 * S));
-      leg.kn.add(plate(0.05 * S, 0.02 * S, 0.13 * S, m.trim, 0, 0.03 * S, 0.10 * S));
-      leg.kn.add(plate(0.045 * S, 0.20 * S, 0.05 * S, m.armor, 0.075 * S, -0.16 * S, -0.04 * S));
-      leg.kn.add(plate(0.045 * S, 0.20 * S, 0.05 * S, m.armor, -0.075 * S, -0.16 * S, -0.04 * S));
+
+    // Hex core — the name, worn on the chest. Rebuilt only if the base one was
+    // removed; normally it is a named reference and survives the strip.
+    if (!rig.hex || !rig.hex.parent) {
+      const hex = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.068 * S, 0.068 * S, 0.035 * S, 6), m.trim);
+      hex.rotation.x = Math.PI / 2;
+      hex.position.set(0, 0.44 * S, 0.150 * S);
+      j.chest.add(hex);
+      rig.hex = hex;
     }
-    // Neck seal — closes the gap between collar and skull that reads as a
-    // floating head from the side.
-    if (rig.j.head) rig.j.head.add(plate(0.155 * S, 0.075 * S, 0.155 * S, m.dark, 0, -0.02 * S, 0));
-    // Forearm fins.
+
+    /* The base rig builds the hex core at 0.11 S radius — 22 cm across on a
+       1.8 m body, which with an unlit emissive material reads as a car
+       headlight bolted to the sternum. It survives the strip because the
+       animation code holds it by name, so it is resized rather than rebuilt. */
+    if (rig.hex && rig.hex.parent && !rig.hex.__resized) {
+      rig.hex.__resized = true;
+      rig.hex.geometry.dispose();
+      rig.hex.geometry = new THREE.CylinderGeometry(0.068 * S, 0.068 * S, 0.035 * S, 6);
+      rig.hex.position.set(0, 0.44 * S, 0.150 * S);
+    }
+
+    /* --- neck and head -------------------------------------------------- */
+    strip(j.head, keep);
+    /* Stylisation multiplier on the head. 1.35 put the skull at 30 cm across
+       on a 1.8 m body, which is past cartoon and into bobblehead. 1.18 lands
+       at about 26 cm — clearly stylised, still a person. */
+    const H = 1.30;
+    j.head.add(lathe([
+      [0.052 * S, -0.05 * S], [0.058 * S, 0.01 * S], [0.055 * S, 0.055 * S]
+    ], m.dark, { squash: 0.92 }));
+
+    // Skull: an egg, widest just above the ear line, flattened at the back.
+    const skull = lathe([
+      [0.0001, -0.132 * S * H],
+      [0.062 * S * H, -0.116 * S * H],
+      [0.096 * S * H, -0.062 * S * H],
+      [0.108 * S * H, 0.0],
+      [0.112 * S * H, 0.052 * S * H],
+      [0.103 * S * H, 0.100 * S * H],
+      [0.074 * S * H, 0.140 * S * H],
+      [0.0001, 0.158 * S * H]
+    ], face ? (rig.faceSkin || m.dark) : m.dark, { squash: 0.96 });
+    skull.position.y = 0.20 * S;
+    skull.scale.z = 1.06;                        // slightly long front to back
+    j.head.add(skull);
+    rig.skull = skull;
+
+    if (face) {
+      const skin = rig.faceSkin || m.dark;
+      const HR = 0.108 * S * H;                 // skull radius at the eye line
+      const HZ = HR * 1.02;                     // ...and its depth after squash
+
+      /* The first cut of this face was a stack of flat boxes glued to the
+         front of the skull: a brow chip, two socket chips, a full-width mask
+         and a mouth bar. Every one of them was a plane facing the camera, so
+         a head built out of a smooth revolved skull rendered as a slab —
+         precisely the blockiness this whole pass exists to remove.
+
+         The rule now: nothing is stuck ON the face. Features are either part
+         of the skull's own silhouette (jaw, nose, ears) or set INTO it (eyes,
+         mouth), positioned so their outer surface lands flush with the skull
+         rather than proud of it. */
+
+      /* No jaw box. The first attempt hung a tapered slab under the skull for
+         a jaw; `taper` scales a unit-width rounded box in X, which scales its
+         bevel with it, so a narrow taper comes out with an almost hard edge —
+         a flat-fronted slab across the entire lower face. The skull profile
+         already reaches below the mouth line, so the jaw only needs a chin. */
+      const chin = ball(0.040 * S * H, skin, 0);
+      chin.scale.set(1.10, 0.70, 0.90);
+      chin.position.set(0, 0.118 * S, 0.046 * S * H);
+      j.head.add(chin);
+
+      // Cheekbones: two flattened balls, which is what turns a sphere into a
+      // face at this level of abstraction.
+      for (const side of [-1, 1]) {
+        const ck = ball(0.034 * S * H, skin, 0);
+        ck.scale.set(0.85, 0.52, 0.70);
+        ck.position.set(side * 0.058 * S * H, 0.176 * S, 0.074 * S * H);
+        j.head.add(ck);
+      }
+
+      // Nose: a tapered wedge off the centre line, small and low.
+      const nose = taper(0.026 * S * H, 0.044 * S * H, 0.052 * S * H, 0.052 * S * H,
+        skin, 0, 0.196 * S, 0.104 * S * H);
+      nose.rotation.x = 0.12;
+      j.head.add(nose);
+
+      // Ears.
+      for (const side of [-1, 1]) {
+        const ear = ball(0.032 * S * H, skin, 0);
+        ear.scale.set(0.40, 1.20, 0.86);
+        ear.position.set(side * 0.104 * S * H, 0.198 * S, -0.004 * S);
+        j.head.add(ear);
+      }
+
+      // Eyes. Large — that is the stylisation — and seated so the front of
+      // the ball is flush with the skull surface rather than floating off it.
+      const white = rig.eyeWhite || (rig.eyeWhite = new THREE.MeshStandardMaterial({
+        color: '#eef4fb', roughness: 0.22, metalness: 0
+      }));
+      const iris = rig.eyeIris || (rig.eyeIris = new THREE.MeshBasicMaterial({
+        color: cfg.eye || cfg.trim || '#5FE3FF', fog: false
+      }));
+      const eyeR = 0.034 * S * H;
+      const eyeX = 0.054 * S * H, eyeY = 0.212 * S;
+      rig.eyes = [];
+      for (const side of [-1, 1]) {
+        const e = ball(eyeR, white);
+        e.scale.set(1, 0.94, 0.62);
+        e.position.set(side * eyeX, eyeY, HZ - eyeR * 0.62);
+        j.head.add(e);
+        const ir = new THREE.Mesh(new THREE.CircleGeometry(eyeR * 0.62, 10), iris);
+        ir.position.set(side * eyeX, eyeY, HZ + 0.001 * S);
+        j.head.add(ir);
+        rig.eyes.push(ir);
+        // Upper lid: a thin curved slice of skin over the top of the ball, so
+        // the eye is set under a brow rather than painted on.
+        const lid = ball(eyeR * 1.06, skin, 0);
+        lid.scale.set(1, 0.42, 0.62);
+        lid.position.set(side * eyeX, eyeY + eyeR * 0.68, HZ - eyeR * 0.66);
+        j.head.add(lid);
+      }
+
+      // Brows: small tapered wedges following the lid, angled inwards.
+      for (const side of [-1, 1]) {
+        const b2 = taper(0.052 * S * H, 0.026 * S * H, 0.016 * S * H, 0.020 * S * H,
+          rig.faceHair || m.dark, side * eyeX, eyeY + eyeR * 1.25, HZ - eyeR * 0.35);
+        b2.rotation.z = side * -0.20;
+        b2.rotation.y = side * 0.25;
+        j.head.add(b2);
+      }
+
+      // Mouth: a shallow inset, not a bar stuck on the chin.
+      const mouth = ball(0.017 * S * H, rig.faceMouth || m.dark, 0);
+      mouth.scale.set(1.9, 0.30, 0.45);
+      mouth.position.set(0, 0.152 * S, HZ * 0.88);
+      j.head.add(mouth);
+
+      // The half-mask is opt-in and covers the mouth only. It was full-face
+      // and near-white, which turned the one surface the camera gets close to
+      // into a blank panel.
+      if (cfg.mask) {
+        const mask = lathe([
+          [0.086 * S * H, 0.132 * S], [0.098 * S * H, 0.158 * S], [0.086 * S * H, 0.182 * S]
+        ], rig.faceMask || m.armor, { squash: 0.98, phiStart: -0.62, phiLength: 1.24 });
+        mask.material.side = THREE.DoubleSide;
+        j.head.add(mask);
+      }
+
+      /* Hair.
+
+         The first version was six tapered clumps radiating off the crown with
+         a shared outward tilt, which produced a spiked halo — a crown of
+         blades rather than a haircut.
+
+         This is a fitted cap plus a fringe. The cap is a revolved shell that
+         follows the skull and stops at the hairline, so there is hair
+         *everywhere* there should be; the fringe is four short pieces angled
+         DOWN and FORWARD over the brow, which is how hair falls. The two
+         side pieces sweep back past the ears rather than out. */
+      if (cfg.hair !== false) {
+        const hairA = rig.faceHair || m.dark;
+        const hairB = rig.faceHairLit || hairA;
+        const HRR = 0.108 * S * H;
+
+        // One closed cap over the whole crown, front included. The two-piece
+        // version left a gap at the hairline that showed bare skull between
+        // the fringe pieces.
+        // Every radius here has to clear the skull profile underneath, or
+        // the crown pokes through the cap and the character goes bald on top.
+        const cap = lathe([
+          [HRR * 1.10, 0.212 * S],
+          [HRR * 1.13, 0.268 * S],
+          [HRR * 1.06, 0.324 * S],
+          [HRR * 0.80, 0.382 * S],
+          [0.0001, 0.418 * S]
+        ], hairA, { squash: 0.99 });
+        j.head.add(cap);
+
+        /* Fringe. A taper is built along its own +Y, so a piece that should
+           hang DOWN over the brow needs to be rotated most of the way over —
+           the first pass used a small negative tilt, which left every strand
+           jutting forwards off the forehead like a visor. */
+        const fringe = [
+          [0.000, 0.318, 0.070, 0.062, 0.088, 0.00, 2.45, hairB],
+          [0.052, 0.314, 0.062, 0.052, 0.078, -0.20, 2.35, hairB],
+          [-0.052, 0.314, 0.062, 0.052, 0.078, 0.20, 2.35, hairA],
+          [0.088, 0.306, 0.038, 0.044, 0.066, -0.38, 2.25, hairA],
+          [-0.088, 0.306, 0.038, 0.044, 0.066, 0.38, 2.25, hairA]
+        ];
+        for (const [x, y, z, w, h, rz, rx, mat] of fringe) {
+          const c = taper(w * S * H, w * 0.34 * S * H, h * S * H, w * 0.66 * S * H,
+            mat, x * S * H, y * S, z * S * H);
+          c.rotation.z = rz;
+          c.rotation.x = rx;
+          j.head.add(c);
+        }
+        // Side sweeps, back past the ear.
+        for (const side of [-1, 1]) {
+          const sw = taper(0.058 * S * H, 0.026 * S * H, 0.115 * S * H, 0.050 * S * H,
+            hairA, side * 0.098 * S * H, 0.268 * S, -0.030 * S * H);
+          sw.rotation.z = side * 0.42;
+          sw.rotation.x = 0.30;
+          j.head.add(sw);
+        }
+      }
+    } else {
+      // Helmet: a smooth shell with a visor band, for anything that is not
+      // meant to have a readable face.
+      j.head.add(lathe([
+        [0.0001, 0.318 * S], [0.070 * S, 0.300 * S], [0.108 * S, 0.245 * S],
+        [0.120 * S, 0.180 * S], [0.112 * S, 0.120 * S], [0.088 * S, 0.088 * S]
+      ], m.armor, { squash: 0.96 }));
+      j.head.add(chip(0.185 * S, 0.042 * S, 0.055 * S, m.trim, 0, 0.205 * S, 0.098 * S, 0.4));
+      j.head.add(chip(0.150 * S, 0.070 * S, 0.045 * S, m.dark, 0, 0.150 * S, 0.100 * S, 0.45));
+    }
+    if (cfg.hood) {
+      const hood = lathe([
+        [0.135 * S, 0.10 * S], [0.185 * S, 0.20 * S], [0.190 * S, 0.30 * S], [0.130 * S, 0.36 * S]
+      ], m.cloth, { squash: 1.05, phiStart: 0.55, phiLength: Math.PI * 2 - 1.1 });
+      hood.material.side = THREE.DoubleSide;
+      j.head.add(hood);
+    }
+    if (cfg.crest) {
+      j.head.add(taper(0.05 * S, 0.012 * S, 0.24 * S, 0.10 * S, m.trim, 0, 0.34 * S, -0.03 * S));
+    }
+
+    /* --- arms ---------------------------------------------------------- */
     for (const side of [-1, 1]) {
+      const tag = side < 0 ? 'L' : 'R';
       const arm = side < 0 ? rig.armL : rig.armR;
-      if (!arm || !arm.el) continue;
-      arm.el.add(plate(0.035 * S, 0.13 * S, 0.11 * S, m.armor, side * 0.085 * S, -0.13 * S, -0.01 * S));
+      if (!arm) continue;
+      strip(arm.sh, keep);
+      strip(arm.el, keep);
+      if (arm.hand) strip(arm.hand, keep);
+
+      const upR = 0.078 * S * (heavy ? 1.22 : 1);
+      const elR = 0.062 * S * (heavy ? 1.18 : 1);
+      // Deltoid ball at the shoulder: solid at any raise angle.
+      arm.sh.add(ball(upR * 1.28, m.suit, 0, 0.92));
+      arm.sh.add(limbGeo(upR, elR, 0.30 * S, m.suit));
+      // Sleeve cuff over the bicep, so the jacket has a sleeve.
+      if (cfg.coat || cfg.jacket !== false) {
+        arm.sh.add(lathe([
+          [upR * 1.16, 0.03 * S], [upR * 1.22, -0.06 * S], [elR * 1.24, -0.26 * S]
+        ], m.cloth, { squash: 0.95 }));
+      }
+      if (cfg.pauldron) {
+        const pd = lathe([
+          [0.055 * S, 0.09 * S], [0.135 * S, 0.045 * S], [0.150 * S, -0.03 * S], [0.135 * S, -0.075 * S]
+        ], m.armor, { squash: 0.86 });
+        pd.position.set(side * 0.025 * S, 0.02 * S, 0);
+        arm.sh.add(pd);
+        arm.sh.add(chip(0.036 * S, 0.013 * S, 0.12 * S, m.trim, side * 0.10 * S, 0.055 * S, 0, 0.35));
+      }
+
+      // Elbow ball, then a forearm that tapers hard into the wrist.
+      arm.el.add(ball(elR * 1.16, m.suit, 0, 0.94));
+      arm.el.add(limbGeo(elR, 0.046 * S, 0.27 * S, m.suit));
+      // Gauntlet: a revolved cuff plus a lit strip. The strip is the read that
+      // says the arm is the weapon.
+      arm.el.add(lathe([
+        [elR * 1.08, -0.10 * S], [elR * 1.14, -0.17 * S], [0.052 * S, -0.27 * S]
+      ], m.armor, { squash: 0.94 }));
+      for (let i = 0; i < 3; i++) {
+        arm.el.add(chip(0.010 * S, 0.010 * S, 0.022 * S, m.trim,
+          (-0.019 + i * 0.019) * S, -0.20 * S, 0.046 * S, 0.3));
+      }
+
+      if (arm.hand) {
+        // A mitt, not a claw: one mass with a thumb and two shallow finger
+        // splits. Oversized on purpose.
+        const hw = 0.075 * S, hh = 0.115 * S, hd = 0.098 * S;
+        const palm = soft(hw * 2, hh, hd, m.dark, 0, -0.055 * S, 0.004 * S, 0.46);
+        arm.hand.add(palm);
+        arm.hand.add(chip(hw * 1.9, 0.022 * S, hd * 0.9, m.armor, 0, -0.012 * S, 0.012 * S, 0.4));
+        // Fingers as one block with two grooves cut by dark slivers — three
+        // separate finger meshes at this scale is detail nobody can resolve
+        // and geometry everybody pays for.
+        const fing = taper(hw * 1.92, hw * 1.74, 0.070 * S, hd * 0.96, m.dark,
+          0, -0.142 * S, 0.010 * S);
+        arm.hand.add(fing);
+        // Two shallow grooves, inset rather than proud. Standing them off the
+        // surface in a contrasting material turned the hand into a four-prong
+        // fork at any distance under three metres.
+        for (const gx of [-0.020, 0.020]) {
+          arm.hand.add(chip(0.005 * S, 0.056 * S, hd * 0.55, m.dark,
+            gx * S, -0.150 * S, 0.052 * S, 0.2));
+        }
+        // A lathe for a thumb is 120 triangles for something the size of a
+        // fingernail. A chip is twelve and reads identically.
+        const thumb = chip(0.034 * S, 0.075 * S, 0.040 * S, m.dark, 0, 0, 0, 0.45);
+        thumb.position.set(side * 0.062 * S, -0.078 * S, 0.030 * S);
+        thumb.rotation.z = side * 1.05;
+        thumb.rotation.x = -0.35;
+        arm.hand.add(thumb);
+        arm.hand.add(chip(0.075 * S, 0.011 * S, 0.016 * S, m.trim, 0, -0.108 * S, 0.050 * S, 0.3));
+        arm.fingers = fing;
+      }
     }
+
+    /* --- legs ---------------------------------------------------------- */
+    for (const side of [-1, 1]) {
+      const leg = side < 0 ? rig.legL : rig.legR;
+      if (!leg) continue;
+      strip(leg.hip, keep);
+      strip(leg.kn, keep);
+      strip(leg.ft, keep);
+
+      const thR = 0.098 * S * (heavy ? 1.2 : 1);
+      const knR = 0.072 * S * (heavy ? 1.16 : 1);
+      leg.hip.add(ball(thR * 1.18, m.suit, 0, 0.94));
+      leg.hip.add(limbGeo(thR, knR, 0.44 * S, m.suit));
+      // Thigh seam, so trousers read as trousers.
+      leg.hip.add(chip(0.012 * S, 0.36 * S, 0.012 * S, m.dark, side * thR * 0.9, -0.22 * S, 0.02 * S, 0.3));
+
+      leg.kn.add(ball(knR * 1.14, m.suit, 0, 0.95));
+      // Knee pad, revolved so it wraps rather than sitting on top like a tile.
+      leg.kn.add(lathe([
+        [knR * 1.02, 0.045 * S], [knR * 1.22, -0.02 * S], [knR * 1.16, -0.09 * S]
+      ], m.armor, { squash: 0.92 }));
+      leg.kn.add(limbGeo(knR, 0.052 * S, 0.40 * S, m.suit));
+
+      // Boot: a flared cuff, a rounded foot mass, a sole and a toe cap. The
+      // flare is what makes the leg silhouette stop being a stick.
+      leg.ft.add(lathe([
+        [0.052 * S, 0.10 * S], [0.082 * S, 0.055 * S], [0.086 * S, -0.02 * S], [0.072 * S, -0.075 * S]
+      ], m.dark, { squash: 0.94 }));
+      const foot = soft(0.115 * S, 0.078 * S, 0.24 * S, m.dark, 0, -0.075 * S, 0.055 * S, 0.44);
+      leg.ft.add(foot);
+      leg.ft.add(soft(0.126 * S, 0.030 * S, 0.275 * S, m.armor, 0, -0.108 * S, 0.058 * S, 0.35));
+      leg.ft.add(taper(0.105 * S, 0.082 * S, 0.062 * S, 0.09 * S, m.armor, 0, -0.062 * S, 0.165 * S));
+      leg.ft.add(chip(0.080 * S, 0.010 * S, 0.016 * S, m.trim, 0, -0.030 * S, 0.126 * S, 0.3));
+    }
+
+    /* --- coat ------------------------------------------------------------
+       BipedRig builds the coat groups; this replaces their contents with a
+       shaped panel and adds the side flaps that give it a back and two sides
+       instead of one slab. */
+    /* BipedRig builds a three-segment coat whenever `cfg.coat` is set, and
+       `makeHexis` sets it. Those panels are chest-parented, full body width
+       and reach the ankles — with the jacket above them the result is a
+       barrel with a head on top. Hexis wears a JACKET; per the Part One lore
+       it is "dark blue, almost black", not a duster. So a rig that has the
+       jacket loses the long coat, and only the archetypes that were designed
+       around one keep it. */
+    const longCoat = !!cfg.coat && cfg.jacket === false;
+    if (rig.coat && rig.coat.length && !longCoat) {
+      for (const c of rig.coat) c.g.visible = false;
+      rig.coatHas = false;
+    } else if (rig.coat && rig.coat.length && !rig.__coatDressed) {
+      rig.__coatDressed = true;
+      const w = [0.40, 0.37, 0.31], h = [0.32, 0.30, 0.26];
+      for (let i = 0; i < rig.coat.length; i++) {
+        const grp = rig.coat[i].g;
+        strip(grp, keep);
+        grp.add(taper(w[i] * S, w[i] * 0.86 * S, h[i] * S, 0.085 * S, m.cloth,
+          0, -h[i] * S / 2, -0.01 * S));
+        for (const side of [-1, 1]) {
+          const f = taper(w[i] * 0.44 * S, w[i] * 0.30 * S, h[i] * 0.94 * S, 0.07 * S, m.cloth,
+            side * w[i] * 0.47 * S, -h[i] * 0.48 * S, 0.012 * S);
+          f.rotation.y = side * 0.55;
+          f.rotation.z = side * -0.06;
+          grp.add(f);
+        }
+        if (i === rig.coat.length - 1) {
+          grp.add(chip(w[i] * 0.98 * S, 0.022 * S, 0.09 * S, m.trim, 0, -h[i] * S + 0.012 * S, -0.01 * S, 0.3));
+        }
+      }
+      rig.coatState = rig.coat.map(() => ({ x: 0, z: 0, vx: 0, vz: 0 }));
+      rig.coatPrev = new THREE.Vector3();
+      rig.root.getWorldPosition(rig.coatPrev);
+      rig.coatHas = true;
+    }
+
+    /* --- back unit ------------------------------------------------------ */
+    if (cfg.pauldron || cfg.face) {
+      const pack = new THREE.Group();
+      pack.position.set(0, 0.36 * S, -0.17 * S);
+      pack.add(soft(0.30 * S, 0.28 * S, 0.10 * S, m.armor, 0, 0, 0, 0.4));
+      pack.add(chip(0.34 * S, 0.045 * S, 0.12 * S, m.dark, 0, 0.15 * S, 0, 0.4));
+      const cores = [];
+      for (const side of [-1, 1]) {
+        const nz = new THREE.Group();
+        nz.position.set(side * 0.115 * S, -0.02 * S, -0.055 * S);
+        nz.add(lathe([
+          [0.030 * S, 0.06 * S], [0.048 * S, 0.0], [0.052 * S, -0.05 * S], [0.038 * S, -0.075 * S]
+        ], m.dark, { rot: [Math.PI / 2, 0, 0] }));
+        const core = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.030 * S, 0.038 * S, 0.035 * S, 8),
+          new THREE.MeshBasicMaterial({
+            color: cfg.trim, transparent: true, opacity: 0.9,
+            blending: THREE.AdditiveBlending, depthWrite: false, fog: false
+          }));
+        core.rotation.x = Math.PI / 2;
+        core.position.z = -0.075 * S;
+        nz.add(core);
+        pack.add(nz);
+        cores.push(core);
+      }
+      j.chest.add(pack);
+      rig.ventPack = pack;
+      rig.ventCores = cores;
+    }
+
+    /* --- rank chevrons -------------------------------------------------
+       Coloured by tier, so in a crowd of nine you can see which two are the
+       Brutes before they wind up. Built here rather than in a later hook so
+       they merge with the rest of the trim instead of costing a draw call
+       each. */
+    if (rig.__tier > 0 && j.chest) {
+      for (let i = 0; i < Math.min(4, rig.__tier); i++) {
+        j.chest.add(chip((0.16 - i * 0.018) * S, 0.020 * S, 0.026 * S, m.trim,
+          0, (0.52 - i * 0.042) * S, 0.152 * S, 0.3));
+      }
+    }
+
+    /* 60-upgrade.js adds its own fingers, boot caps and chest vents on the
+       rig's first update, positioned for the old boxy proportions — on top of
+       the hands, boots and back unit built above. It skips any part already
+       flagged `detailed`, so flagging them here suppresses the duplicate
+       geometry while still letting that pass set `_detailed`, which is what
+       80-perf's merge is gated on. Clearing the flag instead would cost the
+       merge and every draw call it saves. */
+    for (const arm of [rig.armL, rig.armR]) if (arm && arm.hand) arm.hand.userData.detailed = true;
+    for (const leg of [rig.legL, rig.legR]) if (leg && leg.ft) leg.ft.userData.detailed = true;
+    if (j.chest) j.chest.userData.detailed = true;
+
+    Sculpt.built++;
   }
 
-  function buildRank(rig, tier, color) {
-    const S = rig.S;
-    if (!rig.j.chest || tier <= 0) return;
-    const mat = new THREE.MeshBasicMaterial({ color, fog: false });
-    // One chevron per tier, stacked. Reads at thumbnail size, which is the
-    // whole point of it.
-    for (let i = 0; i < Math.min(4, tier); i++) {
-      const w = (0.20 - i * 0.02) * S;
-      rig.j.chest.add(plate(w, 0.022 * S, 0.03 * S, mat, 0, (0.60 - i * 0.045) * S, 0.145 * S));
-    }
-  }
+  /* ======================================================================
+     INSTALL
+     ====================================================================== */
+  step('sculpt', () => {
+    // Faces are opt-in per rig. The four humanoids that should have one get
+    // it; every hostile keeps a helmet, which is also a readability rule —
+    // if it has a face, it is not something you hit.
+    const faceCfg = (rig, opts) => {
+      if (!rig || !rig.cfg) return rig;
+      Object.assign(rig.cfg, opts);
+      rig.faceSkin = rig.faceSkin || new THREE.MeshStandardMaterial({
+        color: opts.skin || '#e8b988', roughness: 0.72, metalness: 0.02
+      });
+      rig.faceHair = rig.faceHair || new THREE.MeshStandardMaterial({
+        color: opts.hairDark || '#3d2113', roughness: 0.62, metalness: 0.04
+      });
+      rig.faceHairLit = rig.faceHairLit || new THREE.MeshStandardMaterial({
+        color: opts.hairLit || '#6b3a1c', roughness: 0.6, metalness: 0.05
+      });
+      rig.faceMask = rig.faceMask || new THREE.MeshStandardMaterial({
+        color: opts.maskColor || '#aab6c6', roughness: 0.6, metalness: 0.12
+      });
+      rig.faceMouth = rig.faceMouth || new THREE.MeshStandardMaterial({
+        color: '#2e1a18', roughness: 0.85, metalness: 0
+      });
+      // makeHexis builds its own face materials and stores them here. The
+      // strip removes the plates that used them, so re-point the record at
+      // the materials the sculpt actually uses — 345-texture dresses whatever
+      // is in this object.
+      rig.faceParts = { skin: rig.faceSkin, hairDark: rig.faceHair, hairLit: rig.faceHairLit, maskMat: rig.faceMask };
+      return rig;
+    };
+    Sculpt.faceCfg = faceCfg;
 
-  /* --- install ------------------------------------------------------------
-     One `before` hook at the head of the whole update chain, so the geometry
-     exists before the detail pass, the merge and the freeze. */
-  step('build', () => {
+    // The player rig is built before this module loads.
+    if (g.rig) faceCfg(g.rig, { face: true, mask: false, eye: '#5FE3FF' });
+
+    // Anything built later goes through the same door.
+    const baseMentor = typeof makeMentor === 'function' ? makeMentor : null;
+    if (baseMentor) {
+      makeMentor = function () {
+        return faceCfg(baseMentor(), { face: true, hair: true, eye: '#bfefff', skin: '#c9a07a', hairDark: '#20242c' });
+      };
+    }
+    const baseCiv = typeof makeCivilian === 'function' ? makeCivilian : null;
+    if (baseCiv) {
+      makeCivilian = function (o) {
+        const r = baseCiv(o);
+        return faceCfg(r, {
+          face: true, hair: true, jacket: true,
+          skin: RND.pick(['#e8b988', '#c98a5e', '#8d5a3b', '#f0cba6', '#6b4229']),
+          hairDark: RND.pick(['#241812', '#3d2113', '#141414', '#5a4630'])
+        });
+      };
+    }
+
     Hook.before(BipedRig.prototype, 'update', function () {
-      if (this.__m3) return;
-      this.__m3 = true;
-      try {
-        dressCoat(this);
-        if (this.cfg && (this.__player || this.cfg.pauldron)) buildVents(this);
-        buildPlating(this);
-        if (this.__tier) buildRank(this, this.__tier, this.cfg.trim);
-        Model3.built++;
-      } catch (e) { console.warn('[model] build', e); }
-    }, 'model30:build');
-
-    // The player rig is constructed before this module loads, so flag it and
-    // let the next frame pick the flag up.
-    if (g.rig) { g.rig.__player = true; g.rig.__m3 = false; }
+      if (this.__sculpted || !Sculpt.enabled) return;
+      this.__sculpted = true;
+      this.__m3 = true;              // supersedes the 3.0 plating pass
+      try { sculpt(this); } catch (e) { console.error('[model] sculpt', e); }
+    }, 'model31:sculpt');
   });
 
-  /* --- the coat -----------------------------------------------------------
+  /* --- the coat solve -----------------------------------------------------
      The base swing is driven by raw speed: `drive = sp * 0.055`. Speed has no
      direction, so the coat trails backwards whether you are running forward,
-     backpedalling or strafing — and 3.0 added a movement mode where
-     backpedalling is the default, which makes that wrong most of the time.
+     backpedalling or strafing — and 3.0 made backpedalling the default
+     movement mode, which makes that wrong most of the time.
 
-     This replaces the solve with a two-axis spring whose rest angle comes
-     from velocity resolved into the rig's own frame. Run forward and it
-     trails behind you; walk backwards and it swings out in front; strafe and
-     it swings across. Stiffness falls down the chain so the tail keeps moving
-     after the top has settled, which is the entire difference between cloth
-     and a hinged board.
-
-     It is three springs and one getWorldPosition per rig per frame, gated by
-     distance, and it runs after the base solve so it simply overwrites what
-     the base wrote rather than fighting it. */
+     Two-axis spring off velocity resolved into the rig's own frame, with
+     stiffness falling down the chain so the tail keeps moving after the top
+     has settled. That difference is cloth versus a hinged board. */
   step('coat', () => {
     const world = new THREE.Vector3();
     Hook.after(BipedRig.prototype, 'update', function (r, dt, s) {
@@ -22600,12 +23861,10 @@ const Model3 = {
       const d = clamp(dt || 0.016, 1 / 240, 0.1);
       this.root.getWorldPosition(world);
 
-      // Distance gate: past ~28 m a 0.3 m panel swings by well under a pixel.
       const cam = g.camera ? g.camera.position : null;
-      if (cam && world.distanceToSquared(cam) > Model3.coatFar) {
+      if (cam && world.distanceToSquared(cam) > Sculpt.coatFar) {
         this.coatPrev.copy(world);
-        for (let i = 0; i < this.coatState.length; i++) {
-          const st = this.coatState[i];
+        for (const st of this.coatState) {
           st.x = damp(st.x, 0.12, 4, d); st.z = damp(st.z, 0, 4, d);
           st.vx = st.vz = 0;
         }
@@ -22613,9 +23872,6 @@ const Model3 = {
         return;
       }
 
-      // Frame velocity in the rig's own frame. Reading it off the transform
-      // rather than a passed-in vector means the player, every archetype, the
-      // mentor and both bosses all get it without knowing anything about it.
       const vx = (world.x - this.coatPrev.x) / d;
       const vz = (world.z - this.coatPrev.z) / d;
       this.coatPrev.copy(world);
@@ -22643,39 +23899,51 @@ const Model3 = {
         st.z = clamp(st.z + st.vz * d, -0.85, 0.85);
       }
       this.applyCoat();
-    }, 'model30:coat');
+    }, 'model31:coat');
 
     BipedRig.prototype.applyCoat = function () {
       for (let i = 0; i < this.coat.length; i++) {
         const grp = this.coat[i].g, st = this.coatState[i];
         grp.rotation.x = st.x;
         grp.rotation.z = st.z;
-        this.coat[i].v = 0;                // the base spring is retired
+        this.coat[i].v = 0;
       }
     };
   });
 
-  /* --- vents --------------------------------------------------------------
-     The emitters open on a dash and their brightness tracks whatever the rig
-     was last told about charge. For everything that is not the player there
-     is no charge, so they idle — which is still better than a blank back. */
-  step('vents', () => {
+  /* --- vents, eyes and fingers ------------------------------------------ */
+  step('anim', () => {
     Hook.after(BipedRig.prototype, 'update', function (r, dt, s) {
-      if (!this.ventCores) return;
       const d = dt || 0.016;
       const st = s || {};
-      const hot = (st.dashing ? 1 : 0) + clamp((st.speed || 0) / 18, 0, 0.7);
-      this.ventHeat = damp(this.ventHeat || 0, hot, 9, d);
-      const k = 0.35 + this.ventHeat * 0.9;
-      for (const c of this.ventCores) {
-        c.material.opacity = clamp(k, 0, 1);
-        c.scale.set(1 + this.ventHeat * 0.9, 1, 1 + this.ventHeat * 0.9);
+      if (this.ventCores) {
+        const hot = (st.dashing ? 1 : 0) + clamp((st.speed || 0) / 18, 0, 0.7);
+        this.ventHeat = damp(this.ventHeat || 0, hot, 9, d);
+        const k = 0.35 + this.ventHeat * 0.9;
+        for (const c of this.ventCores) {
+          c.material.opacity = clamp(k, 0, 1);
+          c.scale.set(1 + this.ventHeat * 0.9, 1, 1 + this.ventHeat * 0.9);
+        }
+        if (this.ventPack) this.ventPack.position.z = (-0.17 - this.ventHeat * 0.02) * this.S;
       }
-      if (this.ventPack) this.ventPack.position.z = (-0.17 - this.ventHeat * 0.02) * this.S;
-    }, 'model30:vents');
+      // A blink. Two frames every few seconds, and its absence is the reason
+      // a stylised face reads as a mannequin.
+      if (this.eyes && this.eyes.length) {
+        this.blinkT = (this.blinkT === undefined ? Math.random() * 4 : this.blinkT) - d;
+        if (this.blinkT <= 0) {
+          this.blinkT = 2.4 + Math.random() * 4.5;
+          this.blinkK = 1;
+        }
+        this.blinkK = Math.max(0, (this.blinkK || 0) - d * 9);
+        const open = 1 - Math.sin(clamp(this.blinkK, 0, 1) * Math.PI);
+        for (const e of this.eyes) e.scale.y = Math.max(0.05, open);
+      }
+      // Fists close on a punch.
+      const punchAmt = st.punch >= 0 ? clamp(st.punch / 0.48, 0, 1) : 0;
+      if (this.armR && this.armR.fingers) this.armR.fingers.rotation.x = damp(this.armR.fingers.rotation.x, punchAmt * 1.0, 14, d);
+      if (this.armL && this.armL.fingers) this.armL.fingers.rotation.x = damp(this.armL.fingers.rotation.x, punchAmt * 0.55, 12, d);
+    }, 'model31:anim');
 
-    // Trail sparks out of the vents on a dash. Pooled through FX, so this is
-    // not an allocation — and it is gated hard because it is per-frame.
     let cool = 0;
     Hook.after(Game.prototype, 'updatePlayer', function (r, dt) {
       cool -= dt || 0.016;
@@ -22686,52 +23954,62 @@ const Model3 = {
       const p = this.player.pos;
       FX.spark(p.clone().add(V3(rand(-0.3, 0.3), 1.25, rand(-0.3, 0.3))),
         2, this.hurtT > 0 ? '#ff8a70' : '#5FE3FF', 2.4, 3, 0.35);
-    }, 'model30:ventFx');
+    }, 'model31:ventFx');
   });
 
-  /* --- rank chevrons ------------------------------------------------------
-     Stamped from the archetype table at spawn, before the first update, so
-     they merge with everything else. */
+  /* --- archetype tagging --------------------------------------------------
+     Runs on the spawn event, which fires from the Foe constructor — before
+     the rig's first update, and therefore before the sculpt reads it. */
   step('rank', () => {
     Bus.on('enemy:spawned', (e) => {
-      if (!e || !e.rig || e.rig.__m3) return;
+      if (!e || !e.rig || e.rig.__sculpted) return;
       const def = (typeof ENEMY_DEFS !== 'undefined' && ENEMY_DEFS[e.kind]) || null;
       e.rig.__tier = def ? def.tier : (e.enf ? 2 : 1);
+      e.rig.cfg.heavy = !!def && (def.tier >= 4 || e.kind === 'warden');
+      // Brute, Warden and Stalker were designed around a duster; everything
+      // else gets the jacket shell.
+      if (e.kind === 'brute' || e.kind === 'warden' || e.kind === 'stalker') e.rig.cfg.jacket = false;
     });
-    // The Act I Enemy never emits enemy:spawned; stamp those on their first tick.
-    const stamp = function () {
+    Hook.before(Enemy.prototype, 'update', function () {
       if (this.rig && this.rig.__tier === undefined) this.rig.__tier = this.enf ? 2 : 1;
-    };
-    Hook.before(Enemy.prototype, 'update', stamp, 'model30:stamp');
+    }, 'model31:tagBase');
   });
 
-  /* --- Hexis, specifically ------------------------------------------------
-     The player gets three things nobody else does: a brighter hex core that
-     tracks charge, a visor that reads damage, and a coat hem that lights on a
-     perfect dodge. All of it drives off state the game already computes. */
+  /* --- Hexis specifics ---------------------------------------------------- */
   step('hexis', () => {
     Hook.after(Game.prototype, 'updatePlayer', function () {
       const rig = this.rig;
-      if (!rig || !rig.hex) return;
-      const chargeK = clamp(this.energy / Math.max(1, this.stats.maxEnergy), 0, 1);
-      const s = 0.9 + chargeK * 0.35 + (this.abil.charging ? this.abil.charge * 0.7 : 0);
-      rig.hex.scale.setScalar(s);
-      if (rig.ventCores && typeof Fight !== 'undefined' && Fight.ready && Fight.dodgeT > 0) {
-        for (const c of rig.ventCores) c.material.opacity = 1;
+      if (!rig) return;
+      if (rig.hex) {
+        const chargeK = clamp(this.energy / Math.max(1, this.stats.maxEnergy), 0, 1);
+        rig.hex.scale.setScalar(0.9 + chargeK * 0.35 + (this.abil.charging ? this.abil.charge * 0.7 : 0));
       }
-    }, 'model30:hexisCore');
+      if (rig.eyeIris) {
+        // The eyes carry the state the HUD also carries, so you can read your
+        // own character without looking at the corner of the screen.
+        const hurt = this.hurtT > 0;
+        const charging = this.abil.charging;
+        rig.eyeIris.color.set(hurt ? '#ff7a5a' : charging ? '#ffffff' : (this.blackout ? '#9fdcff' : '#5FE3FF'));
+      }
+    }, 'model31:hexisCore');
   });
 
-  /* --- report -------------------------------------------------------------
-     A count, because "the models are better" is not a measurement. */
   step('report', () => {
     CLOCK.in(6, () => {
-      console.log('[hexis 3.0] model: ' + Model3.built + ' rigs upgraded' +
-        (g.renderer && g.renderer.info ? ', ' + g.renderer.info.render.calls + ' draw calls this frame' : ''));
+      const info = g.renderer && g.renderer.info;
+      let tris = 0;
+      if (g.rig && g.rig.root) g.rig.root.traverse(o => {
+        if (o.isMesh && o.geometry && o.geometry.attributes.position)
+          tris += o.geometry.attributes.position.count / 3;
+      });
+      console.log('[hexis 3.1] model: ' + Sculpt.built + ' rigs sculpted, player ' +
+        Math.round(tris) + ' tris' +
+        (info ? ', ' + info.render.calls + ' draw calls / ' +
+          (info.render.triangles / 1000).toFixed(0) + 'k tris this frame' : ''));
     });
   });
 
-  console.log('[hexis 3.0] model online:', done.join(', '));
+  console.log('[hexis 3.1] model online:', done.join(', '));
 })();
 
 /* ===== 360-perf.js ========================================================
@@ -23045,8 +24323,835 @@ const Perf3 = {
     }, 'perf3:report');
   });
 
+  /* ------------------------------------------------------------- RIG MERGE
+     `RigOpt.collapse` — the headline of the 2.4.2 optimisation pass, the one
+     the notes credit with taking a character from 89 draw submissions to a
+     handful — has never merged a single mesh. Measured on the shipping build:
+
+         RigOpt.merged  0
+         RigOpt.killed  248
+         grunt rig      130 meshes
+
+     Only `shadows()` was doing anything. Everything the pass claims about
+     draw calls came from removing shadow casters.
+
+     The cause is in `protect()`. It walks the rig looking for Object3Ds the
+     animation code holds by name, and marks each one with `traverse`, which
+     marks the whole subtree. `rig.j` is a plain object of joints, so the walk
+     descends into it, finds `j.hips` — and marks hips and EVERY DESCENDANT.
+     Since every part of a character is under hips, the protected set is the
+     entire rig and `group.length < 2` is true for every group.
+
+     The code even knows the right rule; the comment two lines further down
+     says "their plate children are fair game, the joints are not". The
+     generic walk gets there first.
+
+     Fix: collect the joints explicitly, protect those NODES without
+     traversing them, then run the generic walk with the joints excluded so a
+     named decoration (the blade, its aura, its rings) still protects its own
+     subtree the way it needs to.
+
+     Second fix, in the same place: `mergeGeos` copies position and normal and
+     drops UVs. That was harmless when nothing had a texture. 345-texture puts
+     a map on every character material, so a merged part would come out
+     untextured — the merge would silently undo the surface pass. */
+  step('rig-merge', () => {
+    if (typeof RigOpt === 'undefined') return;
+
+    RigOpt.protect = function (rig) {
+      const keep = new Set();
+      // 1. The joints. Protected as nodes, never traversed — their children
+      //    are exactly what we are here to merge.
+      const joints = new Set();
+      const addJoint = (o) => { if (o && o.isObject3D) { joints.add(o); keep.add(o); } };
+      if (rig.j) for (const k in rig.j) addJoint(rig.j[k]);
+      for (const limb of [rig.armL, rig.armR, rig.legL, rig.legR]) {
+        if (!limb) continue;
+        for (const k in limb) addJoint(limb[k]);
+      }
+      if (rig.coat) for (const c of rig.coat) addJoint(c && c.g);
+      addJoint(rig.root);
+
+      // 2. Everything else the code holds by name keeps its whole subtree: a
+      //    blade that grows has children that grow with it.
+      const mark = (o) => { if (o && o.traverse) o.traverse(n => keep.add(n)); };
+      const scan = (obj, depth) => {
+        if (!obj || depth > 2) return;
+        for (const k in obj) {
+          const v = obj[k];
+          if (!v) continue;
+          if (v.isObject3D) {
+            if (k === 'root' || joints.has(v)) continue;
+            mark(v);
+          } else if (Array.isArray(v)) {
+            v.forEach(x => { if (x && x.isObject3D && !joints.has(x)) mark(x); });
+          } else if (typeof v === 'object' && !v.isMaterial && !v.isBufferGeometry &&
+                     !v.isVector3 && !v.isColor && !v.isTexture) {
+            scan(v, depth + 1);
+          }
+        }
+      };
+      scan(rig, 0);
+      return keep;
+    };
+
+    RigOpt.mergeGeos = function (meshes) {
+      const parts = [];
+      let n = 0, hasUV = true;
+      for (const m of meshes) {
+        const src = m.geometry;
+        const g = src.index ? src.toNonIndexed() : src.clone();
+        m.updateMatrix();
+        g.applyMatrix4(m.matrix);
+        const p = g.attributes.position;
+        const nr = g.attributes.normal;
+        if (!p || !nr) { if (g !== src) g.dispose(); continue; }
+        const uv = g.attributes.uv;
+        if (!uv) hasUV = false;
+        parts.push([p.array, nr.array, uv ? uv.array : null]);
+        n += p.array.length;
+        if (g !== src) g.dispose();
+      }
+      if (!parts.length) return null;
+      const pos = new Float32Array(n), nor = new Float32Array(n);
+      const uvs = hasUV ? new Float32Array((n / 3) * 2) : null;
+      let o = 0, uo = 0;
+      for (const [p, nr, uv] of parts) {
+        pos.set(p, o); nor.set(nr, o); o += p.length;
+        if (uvs && uv) { uvs.set(uv, uo); uo += uv.length; }
+      }
+      const out = new THREE.BufferGeometry();
+      out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+      // Without this a merged part loses its texture coordinates and every
+      // map 345-texture attached silently stops working.
+      if (uvs) out.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+      out.computeBoundingSphere();
+      return out;
+    };
+
+    // Merging one mesh is still worth it: it drops the matrix update and the
+    // parent transform, and a joint with a single decorated part is common.
+    const baseCollapse = RigOpt.collapse.bind(RigOpt);
+    RigOpt.collapse = function (rig) { return baseCollapse(rig); };
+  });
+
   console.log('[hexis 3.0] perf online:', done.join(', ') +
     '  ·  body cap ' + Perf3.capNow);
+})();
+
+/* ===== 370-lore.js ========================================================
+   HEXIS 3.1 — Part One.
+
+   The comic and the 2.x game disagree about almost everything, and the comic
+   is better. This file makes the game the comic.
+
+   WHAT CHANGES, AND WHY
+
+   The 2.x story is a revenge plot: Kell murders Hexis's parents, Hexis
+   hunts him. Part One is a different, stronger story — Hexis is one of
+   several beings scattered from a broken asteroid, raised on Earth by people
+   who found him in a crater and never told him what he was. Kell is not a
+   murderer, he is an enforcer sent to correct an error. Rex does not hand out
+   street jobs, he steps out of a portal and tells you the truth.
+
+   THE JACKET
+
+   The single best thing in the source material, and it is already a game
+   mechanic in everything but name:
+
+     "It's not what gives you your powers. It does the opposite. It keeps your
+      powers from being released at their full potential."
+
+   So the jacket is a real, removable item with real numbers on both sides.
+   Wearing it: capped charge, ordinary damage, and total stability. Taking it
+   off: half again the damage, a bigger pool, faster regen — and a Rage meter
+   that fills on every hit you take and every kill you land. Fill it and you
+   are not in control any more.
+
+   BLACKOUT
+
+     "He grew taller. His skin turned completely black. Large claws formed on
+      his hands, and blue flames erupted around his fists."
+
+   A transformation with a real cost. You hit far harder, you cannot heal,
+   you take more damage, and when it ends you are wide open for four seconds.
+   Rex knocks you out of it in the comic; here, it ends on a timer and leaves
+   you on your knees, which is the same beat with the player still holding
+   the controller.
+
+   THE CAST
+
+   Kell rebuilt to the description — seven feet, deep purple, ancient armour,
+   red eyes. Rex given his long shimmering coat. The Response Team — Flare,
+   Phantom, Brick, Specter, Ace and Commander Pierce — built as real
+   characters with their own palettes, and a job where they fight beside you
+   badly, because that is the point of them.
+
+   And the codex gets Part One in it, unlocked as you go, so the story is
+   somewhere you can read it rather than something that scrolls past.
+   ========================================================================= */
+
+const LORE = {
+  jacket: {
+    name: 'The Regulator',
+    from: 'Rex',
+    desc: 'A dark blue jacket, almost black, that shimmers like the pattern on his coat. ' +
+          'It does not give you anything. It holds you back — on purpose.',
+    on: { energyMul: 1.0, damageMul: 1.0, regenMul: 1.0, rage: 0 },
+    off: { energyMul: 1.5, damageMul: 1.6, regenMul: 1.35, rage: 1 }
+  },
+  blackout: {
+    dur: 14,
+    damageMul: 2.6,
+    incomingMul: 1.45,
+    speedMul: 1.15,
+    exhaustion: 4.0
+  },
+  /* Codex entries, gated on flags the game already sets. */
+  entries: [
+    { id: 'asteroid', title: 'The Asteroid', gate: () => true, text:
+      'It drifted for longer than anyone can measure, and it was not natural. Deep inside, ' +
+      'in chambers built with impossible precision, several beings lay in stasis. Nobody ' +
+      'knows who put them there. Then the cracks began — hairline at first, spreading like ' +
+      'veins of lightning — and it came apart. The beings were flung in every direction. ' +
+      'Some tumbled for years. Some were pulled into the currents between dimensions and ' +
+      'arrived on versions of worlds that should not exist. One of them came here.' },
+    { id: 'crater', title: 'Elder Street', gate: () => true, text:
+      'They found him in a field, in a crater of scorched earth, skin frosted over while the ' +
+      'ground around him was still cooling. A boy, maybe seven. They argued about calling ' +
+      'the authorities. They decided not to. They gave him a name and told everyone he was ' +
+      'an orphan, and they raised him like a normal kid. He grew up believing it.' },
+    { id: 'park', title: 'The Park', gate: (g) => g.lv >= 2, text:
+      'He was twelve. Three older boys had him on the ground. Then he was standing in the ' +
+      'middle of a crater, the jungle gym twisted into scrap, half the trees uprooted, and ' +
+      'his hands were glowing. His family told him he was special. They did not tell him ' +
+      'the truth, because they did not know it either.' },
+    { id: 'kell', title: 'Kell', gate: (g) => !!g.flags.spared || !!g.flags.job_blackout, text:
+      'Seven feet of him, skin a purple so deep it seemed to absorb the light, armour older ' +
+      'than any language on Earth. "Your kind were not meant to be here. You are anomalies. ' +
+      'Threats to the natural order." He had been sent to correct an error. The fight lasted ' +
+      'under three minutes, and it ended with Kell backing away, afraid, saying: you have no ' +
+      'idea what you will become.' },
+    { id: 'rex', title: 'Rex', gate: (g) => !!g.run || !!g.flags.job_blackout, text:
+      'The portal opened where there had been nothing, edges crackling blue, and through it ' +
+      'was a landscape that was definitely not Earth. He wore a long coat that shimmered ' +
+      'with faint patterns and he already knew the name. He has been tracking the others — ' +
+      'traces, signs, scattered across worlds. He will not pretend to have the answers he ' +
+      'does not have, which is the reason to believe the ones he does.' },
+    { id: 'jacket', title: 'The Regulator', gate: (g) => !!g.flags.has_jacket, text:
+      '"Your powers are significant. But you have almost no control over them. Your emotions ' +
+      'dictate your strength, and when you get angry, things get destroyed." It limits how ' +
+      'much you can reach at once. It is not armour and it is not a weapon. It is a crutch, ' +
+      'and Rex said so to his face: wear it while you learn, and put it down when you have.' },
+    { id: 'blackout', title: 'Blackout', gate: (g) => !!g.flags.seen_blackout, text:
+      'It happened in training, when he was pushed too far. He grew taller. His skin turned ' +
+      'completely black. Claws came out of his hands and blue fire wrapped his fists. His ' +
+      'mind was still in there — he could think, he could hear — but the rage was driving. ' +
+      'Rex had to put him down to stop it. It is not a monster and it is not an enemy. It is ' +
+      'a part of him, and the only way through is to accept that.' },
+    { id: 'response', title: 'The Response Team', gate: (g) => !!g.flags.met_team, text:
+      'Six people the government found because they could not find him. Flare, who was a ' +
+      'waitress in Chicago. Phantom, who was a construction worker and never wanted to fight ' +
+      'anyone. Brick, eighteen, who thinks having powers is genuinely cool and is not wrong. ' +
+      'Specter, an army medic rebuilt by a procedure nobody will name. Ace, who has no file. ' +
+      'And Commander Pierce, who has no powers and no illusions: "You are tools, and I decide ' +
+      'how you are used."' },
+    { id: 'syndicate', title: 'The Syndicate', gate: (g) => !!g.flags.job_cargo, text:
+      'Well-organised, well-funded and highly mobile, hitting research facilities for weapons ' +
+      'that could level a city. Their leader knew what Hexis was before Hexis did. "I know ' +
+      'about you because I was there. When the asteroid broke. I saw it. I saw all of you."' },
+    { id: 'others', title: 'The Others', gate: (g) => !!g.flags.act3_done, text:
+      'There are more. Scattered across alternate Earths and planets past this solar system, ' +
+      'each one unaware of the rest. Rex has been tracking them for years and has found ' +
+      'traces, not people. The portals are not random — every one of them leads to the same ' +
+      'place, and that place is probably where the asteroid came from.' }
+  ]
+};
+
+(function lorePass() {
+  const g = window.HEXIS;
+  if (!g) return;
+  const done = [];
+  const step = (n, fn) => { try { fn(); done.push(n); } catch (e) { console.error('[lore] ' + n, e); } };
+
+  /* ------------------------------------------------------------------- CSS */
+  step('style', () => {
+    const css = `
+#ragewrap{
+  position:absolute; left:max(14px,env(safe-area-inset-left)); bottom:calc(max(16px,env(safe-area-inset-bottom)) + 66px);
+  width:min(300px,42vw); display:none;
+}
+#ragewrap.on{ display:block; }
+#ragebar{
+  height:6px; background:#160d14; border:1px solid #3a1c2a; clip-path:var(--clip); overflow:hidden;
+}
+#ragebar i{ display:block; height:100%; transform-origin:left; transform:scaleX(0);
+  background:linear-gradient(90deg,#8A4BFF,#FF4D7A); box-shadow:0 0 12px #FF4D7A88; transition:transform .12s linear; }
+#ragewrap.full #ragebar i{ animation:ragepulse .55s infinite; }
+@keyframes ragepulse{ 50%{ opacity:.5 } }
+#ragelbl{ font:400 8px/1.6 var(--mono); letter-spacing:.28em; text-transform:uppercase; color:#c98aa8; }
+
+#jacketchip{
+  position:absolute; left:max(14px,env(safe-area-inset-left)); bottom:calc(max(16px,env(safe-area-inset-bottom)) + 92px);
+  font:400 9px/1 var(--mono); letter-spacing:.22em; text-transform:uppercase; color:var(--steel);
+}
+#jacketchip b{ color:var(--arc); font-weight:400; }
+#jacketchip.off b{ color:var(--threat); }
+
+html.blackout #dmgvig{ opacity:.55 !important; background:radial-gradient(circle at 50% 50%, transparent 30%, #1a0020cc 95%) !important; }
+`;
+    const n = document.createElement('style'); n.id = 'lore31-css'; n.textContent = css;
+    document.head.appendChild(n);
+
+    const ui = document.querySelector('#ui');
+    if (!ui) return;
+    const wrap = document.createElement('div');
+    wrap.id = 'ragewrap';
+    wrap.innerHTML = '<div id="ragelbl">Rage</div><div id="ragebar"><i></i></div>';
+    ui.appendChild(wrap);
+    const chip = document.createElement('div');
+    chip.id = 'jacketchip';
+    chip.innerHTML = 'Regulator <b>ON</b>';
+    ui.appendChild(chip);
+  });
+
+  /* ==================================================================== JACKET
+     A real item with numbers on both sides of the decision. */
+  step('jacket', () => {
+    g.jacketOn = true;
+    g.rage = 0;
+    g.blackout = false;
+    g.blackoutT = 0;
+    g.exhaustT = 0;
+
+    Hook.after(Game.prototype, 'restore', function () {
+      if (this.flags.jacketOff) this.jacketOn = false;
+      if (this.flags.has_jacket === undefined) this.flags.has_jacket = !!this.flags.job_blackout;
+    }, 'lore31:restore');
+
+    /* The stat block is a getter that composes from ranks. Wrap it rather
+       than rewrite it: the jacket is a multiplier on the result, which is
+       exactly what the fiction says it is. */
+    const baseStats = Object.getOwnPropertyDescriptor(Game.prototype, 'stats').get;
+    Object.defineProperty(Game.prototype, 'stats', {
+      configurable: true,
+      get: function () {
+        const s = baseStats.call(this);
+        if (!this.jacketOn) {
+          const o = LORE.jacket.off;
+          s.maxEnergy *= o.energyMul;
+          s.dmgMul *= o.damageMul;
+          s.energyRegen *= o.regenMul;
+        }
+        if (this.blackout) {
+          s.dmgMul *= LORE.blackout.damageMul;
+          s.sprintSpeed *= LORE.blackout.speedMul;
+          s.dmgResMul *= LORE.blackout.incomingMul;
+        }
+        if (this.exhaustT > 0) {
+          s.dmgMul *= 0.5;
+          s.dmgResMul *= 1.6;
+        }
+        return s;
+      }
+    });
+
+    g.setJacket = function (on, silent) {
+      if (!this.flags.has_jacket) {
+        this.ui.toast('NOTHING TO TAKE OFF', 'Rex has not given you the Regulator yet');
+        return false;
+      }
+      if (this.blackout) return false;
+      this.jacketOn = !!on;
+      this.flags.jacketOff = !on;
+      this.rage = on ? 0 : this.rage;
+      this.persist();
+      const chip = document.querySelector('#jacketchip');
+      if (chip) {
+        chip.innerHTML = 'Regulator <b>' + (on ? 'ON' : 'OFF') + '</b>';
+        chip.classList.toggle('off', !on);
+      }
+      const rw = document.querySelector('#ragewrap');
+      if (rw) rw.classList.toggle('on', !on);
+      if (this.rig && this.rig.mats) {
+        // The jacket is the cloth. Off means the shell goes with it.
+        for (const c of (this.rig.coat || [])) c.g.visible = false;
+      }
+      if (!silent) {
+        if (on) {
+          this.ui.toast('REGULATOR ON', 'Capped, stable, and you will not lose yourself.');
+          FX.ringBurst(this.player.pos.clone(), 4, '#5FE3FF', 0.5);
+        } else {
+          this.ui.toast('REGULATOR OFF', '+60% damage, +50% charge — and rage now builds.');
+          FX.flash(0.4, '#B48CFF');
+          FX.ringBurst(this.player.pos.clone(), 7, '#B48CFF', 0.8, 0.4);
+          try { AudioX.play('unlock_power', { vol: 0.9 }); } catch (e) { }
+          this.ui.say('REX', 'You are supposed to wear it while you learn. Not forever. Your call.', 4);
+        }
+      }
+      Bus.emit('jacket:changed', on);
+      return true;
+    };
+
+    // J on the keyboard; a row in the pause menu for touch.
+    addEventListener('keydown', (e) => {
+      if (e.code !== 'KeyJ' || e.repeat) return;
+      if (Input.panelOpen && Input.panelOpen()) return;
+      if (g.state !== 'play') return;
+      g.setJacket(!g.jacketOn);
+    });
+
+    // Rex hands it over the first time you finish a job for him.
+    Bus.on('job:complete', (job) => {
+      if (g.flags.has_jacket || job.giver !== 'REX') return;
+      g.flags.has_jacket = true;
+      g.persist();
+      CLOCK.in(2.0, () => {
+        g.ui.say('REX', 'Take this. It is not what gives you your powers — it does the opposite.', 4.6);
+        CLOCK.in(4.8, () => {
+          g.ui.toast('THE REGULATOR', (Input.touch ? 'Take it off from the pause menu' : 'Press J') +
+            ' — off is stronger, and less safe');
+          FX.ringBurst(g.player.pos.clone(), 6, '#2B6BFF', 0.8, 0.4);
+        });
+      });
+    });
+  });
+
+  /* =================================================================== RAGE */
+  step('rage', () => {
+    const bar = () => document.querySelector('#ragebar i');
+    let shown = 0;
+    const render = () => {
+      const b = bar();
+      if (!b) return;
+      const k = Math.round(clamp(g.rage / 100, 0, 1) * 64) / 64;
+      if (k === shown) return;
+      shown = k;
+      b.style.transform = 'scaleX(' + k + ')';
+      const w = document.querySelector('#ragewrap');
+      if (w) w.classList.toggle('full', k >= 1);
+    };
+
+    const add = (v) => {
+      if (g.jacketOn || g.blackout || g.state !== 'play') return;
+      g.rage = clamp(g.rage + v, 0, 100);
+      render();
+      if (g.rage >= 100) g.enterBlackout();
+    };
+    Bus.on('player:hurt', (dmg) => add(dmg * 0.9));
+    Bus.on('enemy:killed', () => add(6));
+    Bus.on('parry:perfect', () => add(4));
+
+    Hook.after(Game.prototype, 'frame', function () {
+      if (this.jacketOn || this.blackout) return;
+      const d = this._dtAvg || 0.016;
+      // Rage bleeds off when nothing is happening, so walking around does not
+      // eventually transform you.
+      if (this.rage > 0 && (!this.director || this.director.heat < 0.3)) {
+        this.rage = Math.max(0, this.rage - 5 * d);
+        render();
+      }
+    }, 'lore31:ragebleed');
+  });
+
+  /* =============================================================== BLACKOUT */
+  step('blackout', () => {
+    let saved = null;
+
+    g.enterBlackout = function () {
+      if (this.blackout || this.jacketOn) return;
+      this.blackout = true;
+      this.blackoutT = LORE.blackout.dur;
+      this.rage = 0;
+      this.flags.seen_blackout = true;
+      this.persist();
+      document.documentElement.classList.add('blackout');
+
+      const rig = this.rig;
+      if (rig) {
+        saved = {
+          suit: rig.mats.suit.color.clone(),
+          armor: rig.mats.armor.color.clone(),
+          dark: rig.mats.dark.color.clone(),
+          cloth: rig.mats.cloth.color.clone(),
+          skin: rig.faceSkin ? rig.faceSkin.color.clone() : null
+        };
+        // "His skin turned completely black." All of it, including the face.
+        rig.mats.suit.color.set('#05060a');
+        rig.mats.armor.color.set('#0a0810');
+        rig.mats.dark.color.set('#020204');
+        rig.mats.cloth.color.set('#05060a');
+        if (rig.faceSkin) rig.faceSkin.color.set('#08070c');
+        // "He grew taller." BipedRig.update writes root.scale every frame for
+        // its squash-and-stretch, so setting it here is overwritten on the
+        // next tick. A multiplier the rig applies on top is the only version
+        // that survives.
+        rig.__sizeMul = 1.14;
+        rig.setTrim('#5FA8FF', 4.2);
+        if (rig.eyeIris) rig.eyeIris.color.set('#dff2ff');
+        buildClaws(rig);
+        setClaws(rig, true);
+      }
+
+      FX.flash(0.85, '#8A4BFF');
+      FX.shake(0.9, 0.9);
+      FX.stop(0.3);
+      try { AudioX.play('roar', { vol: 1 }); Score.go('boss', true); Grade.glitch(0.9, 1.6); } catch (e) { }
+      for (let i = 0; i < 18; i++) {
+        const a = (i / 18) * TAU;
+        FX.bolt(this.player.pos.clone().add(V3(0, 1.1, 0)),
+          this.player.pos.clone().add(V3(Math.cos(a) * 8, rand(0, 4), Math.sin(a) * 8)), '#7fb8ff', 0.32, 1.4);
+      }
+      this.ui.toast('BLACKOUT', 'You are still in there. You are not driving.');
+      this.ui.say('HEXIS', 'Not now. Not now—', 2.2);
+      Bus.emit('blackout:start');
+    };
+
+    g.exitBlackout = function () {
+      if (!this.blackout) return;
+      this.blackout = false;
+      this.blackoutT = 0;
+      this.exhaustT = LORE.blackout.exhaustion;
+      this.rage = 0;
+      document.documentElement.classList.remove('blackout');
+      const rig = this.rig;
+      if (rig && saved) {
+        rig.mats.suit.color.copy(saved.suit);
+        rig.mats.armor.color.copy(saved.armor);
+        rig.mats.dark.color.copy(saved.dark);
+        rig.mats.cloth.color.copy(saved.cloth);
+        if (saved.skin && rig.faceSkin) rig.faceSkin.color.copy(saved.skin);
+        rig.__sizeMul = 1;
+        rig.setTrim('#5FE3FF', 1.8);
+        setClaws(rig, false);
+      }
+      FX.flash(0.5, '#bfefff');
+      FX.ringBurst(this.player.pos.clone(), 8, '#5FE3FF', 0.9, 0.5);
+      try { Score.go('combat', true); } catch (e) { }
+      this.ui.toast('SPENT', 'Four seconds of nothing left. Do not be standing anywhere stupid.');
+      Bus.emit('blackout:end');
+    };
+
+    /* Claws and the blue fire on the fists. Built once, hidden between uses —
+       a transformation that allocates geometry every time it fires is a
+       transformation that stutters every time it fires. */
+    function buildClaws(rig) {
+      if (rig.__claws) return;
+      rig.__claws = [];
+      const S = rig.S;
+      const clawMat = new THREE.MeshStandardMaterial({ color: '#0b0b12', roughness: 0.35, metalness: 0.6 });
+      const fireMat = new THREE.MeshBasicMaterial({
+        color: '#5FA8FF', transparent: true, opacity: 0.55,
+        blending: THREE.AdditiveBlending, depthWrite: false, fog: false
+      });
+      for (const arm of [rig.armL, rig.armR]) {
+        if (!arm || !arm.hand) continue;
+        const grp = new THREE.Group();
+        for (let i = 0; i < 3; i++) {
+          const c = taper(0.026 * S, 0.004 * S, 0.13 * S, 0.022 * S, clawMat,
+            (-0.036 + i * 0.036) * S, -0.24 * S, 0.028 * S);
+          c.rotation.x = -0.25;
+          grp.add(c);
+        }
+        const fire = new THREE.Mesh(new THREE.SphereGeometry(0.15 * S, 8, 6), fireMat);
+        fire.position.set(0, -0.13 * S, 0.01 * S);
+        grp.add(fire);
+        grp.visible = false;
+        arm.hand.add(grp);
+        rig.__claws.push({ grp, fire });
+      }
+    }
+    function setClaws(rig, on) {
+      if (!rig.__claws) return;
+      for (const c of rig.__claws) c.grp.visible = on;
+    }
+
+    Hook.after(Game.prototype, 'frame', function () {
+      const d = this._dtAvg || 0.016;
+      if (this.exhaustT > 0) this.exhaustT = Math.max(0, this.exhaustT - d);
+      if (!this.blackout) return;
+      this.blackoutT -= d;
+      // Blue fire, sold with the pooled FX rather than a particle system.
+      if (this.rig && this.rig.__claws && Math.random() < d * 26) {
+        const c = RND.pick(this.rig.__claws);
+        const p = new THREE.Vector3();
+        c.fire.getWorldPosition(p);
+        FX.spark(p, 2, '#7fb8ff', 3.4, 4, 0.5);
+        c.fire.scale.setScalar(0.85 + Math.random() * 0.5);
+      }
+      if (this.blackoutT <= 0) this.exitBlackout();
+    }, 'lore31:blackoutTick');
+
+    // No healing in Blackout. The fiction is that you are not making decisions.
+    Hook.before(AbilitySystem.prototype, 'tryHeal', function () {
+      if (this.g.blackout) {
+        this.g.ui.toast('NO', 'Blackout does not do first aid');
+        return false;
+      }
+    }, 'lore31:noHeal');
+
+    // Dying drops you out of it rather than leaving a black corpse.
+    Hook.before(Game.prototype, 'onDeath', function () {
+      if (this.blackout) this.exitBlackout();
+    }, 'lore31:deathExit');
+
+    g.blackoutNow = () => g.enterBlackout();
+  });
+
+  /* The size multiplier the transformation needs, applied after the rig has
+     written its own squash. One multiply per frame per rig, and it is the
+     only place root.scale is touched by anything other than BipedRig. */
+  step('sizemul', () => {
+    Hook.after(BipedRig.prototype, 'update', function () {
+      const k = this.__sizeMul;
+      if (!k || k === 1) return;
+      this.root.scale.multiplyScalar(k);
+    }, 'lore31:sizeMul');
+  });
+
+  /* ====================================================== KELL, TO SPEC */
+  step('kell', () => {
+    if (typeof makeKell !== 'function') return;
+    const base = makeKell;
+    makeKell = function () {
+      const rig = base();
+      try {
+        /* "Easily seven feet tall, his skin a deep purple colour that seemed
+           to absorb light. His eyes glowed with a soft red luminescence. He
+           wore a suit of armour that looked ancient, covered in symbols that
+           no living human could translate." */
+        rig.root.scale.setScalar(1.18);           // ~2.1 m against Hexis's 1.8
+        if (rig.mats) {
+          rig.mats.suit.color.set('#3b1f52');      // deep purple, light-absorbing
+          rig.mats.suit.roughness = 0.86;
+          rig.mats.armor.color.set('#2a2230');     // ancient, dulled metal
+          rig.mats.armor.metalness = 0.72;
+          rig.mats.armor.roughness = 0.52;
+          rig.mats.dark.color.set('#120a1a');
+          rig.mats.cloth.color.set('#1d1226');
+        }
+        rig.cfg.eye = '#FF3B30';
+        rig.cfg.heavy = true;
+        rig.cfg.jacket = false;
+        if (rig.setTrim) rig.setTrim('#FF3B30', 1.6);
+      } catch (e) { console.warn('[lore] kell', e); }
+      return rig;
+    };
+
+    /* The symbols. Drawn once into a texture and put on the armour, which is
+       the only way "covered in symbols no living human could translate" can
+       be true without hand-placing a hundred decals. */
+    Bus.on('boss:spawned', () => { });
+    Hook.after(Game.prototype, 'startArena', function () {
+      const b = this.boss;
+      if (!b || !b.rig || !b.rig.mats || b.rig.__glyphed) return;
+      b.rig.__glyphed = true;
+      try {
+        const tex = Tex.make('glyphs', (x, s) => {
+          x.fillStyle = '#8c8c8c'; x.fillRect(0, 0, s, s);
+          x.strokeStyle = 'rgba(20,10,30,0.85)';
+          x.lineCap = 'round';
+          const rnd = new RNG(90210);
+          for (let i = 0; i < 90; i++) {
+            const cx = rnd.range(0, s), cy = rnd.range(0, s), r = rnd.range(4, 16);
+            x.lineWidth = rnd.range(1.5, 3);
+            x.beginPath();
+            // A made-up script: strokes on a hex lattice, never a closed loop.
+            const n = rnd.int(2, 4);
+            let px = cx, py = cy;
+            x.moveTo(px, py);
+            for (let k = 0; k < n; k++) {
+              const a = Math.floor(rnd.range(0, 6)) * Math.PI / 3;
+              px += Math.cos(a) * r; py += Math.sin(a) * r;
+              x.lineTo(px, py);
+            }
+            x.stroke();
+            if (rnd.chance(0.3)) { x.beginPath(); x.arc(cx, cy, r * 0.35, 0, Math.PI * 2); x.stroke(); }
+          }
+        });
+        const m = b.rig.mats.armor;
+        m.__dressed = false;
+        Tex.dress(m, 'glyphs', 2.2, 1.1);
+      } catch (e) { }
+    }, 'lore31:kellGlyphs');
+  });
+
+  /* ======================================================= REX, TO SPEC */
+  step('rex', () => {
+    if (typeof makeMentor !== 'function') return;
+    const base = makeMentor;
+    makeMentor = function () {
+      const rig = base();
+      try {
+        /* "Humanoid, with dark hair and a weathered face. He wore a long coat
+           that seemed to shimmer with faint patterns." */
+        if (rig.mats) {
+          rig.mats.cloth.color.set('#151b2c');
+          rig.mats.suit.color.set('#1b2130');
+          rig.mats.armor.color.set('#2a3140');
+          if (Tex && Tex.enabled) {
+            rig.mats.cloth.__dressed = false;
+            Tex.dress(rig.mats.cloth, 'leather', 2.0, 1.2);
+            // The shimmer: a low-roughness coat that catches the rim light and
+            // moves patterns across itself as you walk round him.
+            rig.mats.cloth.roughness = 0.34;
+            rig.mats.cloth.metalness = 0.28;
+          }
+        }
+        rig.cfg.coat = true;
+        rig.cfg.jacket = false;
+        rig.cfg.hair = true;
+        rig.cfg.eye = '#bfefff';
+      } catch (e) { }
+      return rig;
+    };
+  });
+
+  /* ============================================== THE RESPONSE TEAM */
+  const TEAM = [
+    { id: 'flare', name: 'Flare', real: 'Monica', trim: '#FF6A2A', suit: '#3a1a12', armor: '#5a2a16',
+      line: 'Do not get in my way. Do not slow me down.', kind: 'enforcer' },
+    { id: 'phantom', name: 'Phantom', real: 'David', trim: '#9fd8ff', suit: '#1a2430', armor: '#243444',
+      line: 'I am not a fighter. I never wanted to be a fighter.', kind: 'grunt', ghost: true },
+    { id: 'brick', name: 'Brick', real: 'Marcus', trim: '#FFC64D', suit: '#2c2f38', armor: '#4a4433',
+      line: 'The situation sucks. But I have got powers, and I get to use them?', kind: 'brute' },
+    { id: 'specter', name: 'Specter', real: 'Elena', trim: '#7CFFB2', suit: '#1c2a24', armor: '#2a3c33',
+      line: 'We are not here to be heroes. We are here because we are useful.', kind: 'enforcer' },
+    { id: 'ace', name: 'Ace', real: '—', trim: '#B48CFF', suit: '#191426', armor: '#241c36',
+      line: 'I am here to do a job. Nothing more.', kind: 'stalker' },
+    { id: 'pierce', name: 'Cmdr Pierce', real: 'no powers', trim: '#7C8AA3', suit: '#23262c', armor: '#33383f',
+      line: 'You are tools. And I am the one who decides how you are used.', kind: 'grunt' }
+  ];
+
+  step('team', () => {
+    g.teamRigs = [];
+    /* Allies, not enemies: they are built from the same archetype rigs so
+       every animation applies, then coloured and put on the player's side. */
+    g.spawnTeam = function (ids, at) {
+      const out = [];
+      for (const id of (ids || TEAM.map(t => t.id))) {
+        const T = TEAM.find(t => t.id === id);
+        if (!T) continue;
+        try {
+          const rig = makeArchetypeRig(T.kind);
+          rig.cfg.face = true;
+          rig.cfg.hair = true;
+          rig.cfg.jacket = true;
+          rig.cfg.eye = T.trim;
+          rig.mats.suit.color.set(T.suit);
+          rig.mats.armor.color.set(T.armor);
+          rig.mats.trim.color.set(T.trim);
+          if (Sculpt.faceCfg) Sculpt.faceCfg(rig, { face: true, hair: true, eye: T.trim });
+          if (T.ghost) {
+            rig.root.traverse(o => {
+              if (o.isMesh && o.material && !o.material.transparent) {
+                o.material = o.material.clone();
+                o.material.transparent = true;
+                o.material.opacity = 0.55;
+              }
+            });
+          }
+          const p = (at || g.player.pos).clone().add(V3(rand(-6, 6), 0, rand(-6, 6)));
+          rig.root.position.copy(p);
+          g.scene.add(rig.root);
+          const unit = { id: T.id, name: T.name, rig, t: rand(0, 6), pos: p, T };
+          g.teamRigs.push(unit);
+          out.push(unit);
+        } catch (e) { console.warn('[lore] team ' + id, e); }
+      }
+      g.flags.met_team = true;
+      g.persist();
+      return out;
+    };
+    g.clearTeam = function () {
+      for (const u of this.teamRigs) {
+        this.scene.remove(u.rig.root);
+        if (u.rig.dispose) u.rig.dispose();
+      }
+      this.teamRigs.length = 0;
+    };
+    Bus.on('zone:loaded', () => g.clearTeam());
+
+    /* They fight. Badly, and only near you, which is exactly the point the
+       comic makes about them before they learn to work together. */
+    Hook.after(Game.prototype, 'frame', function () {
+      if (!this.teamRigs.length || this.state !== 'play') return;
+      const d = this._dtAvg || 0.016;
+      for (const u of this.teamRigs) {
+        u.t += d;
+        // Find something to shout at.
+        let target = null, bd = 26;
+        for (const e of this.enemies) {
+          if (e.dead) continue;
+          const dist = dist2D(e.pos, u.pos);
+          if (dist < bd) { bd = dist; target = e; }
+        }
+        const goal = target ? target.pos : this.player.pos;
+        const dir = dirTo(u.pos, goal, SCR.v3());
+        const want = target ? (bd > 4 ? 1 : 0) : (dist2D(u.pos, this.player.pos) > 7 ? 1 : 0);
+        u.pos.x += dir.x * 4.2 * want * d;
+        u.pos.z += dir.z * 4.2 * want * d;
+        u.rig.root.position.copy(u.pos);
+        u.rig.root.rotation.y = yawTo(u.pos, goal);
+        u.rig.update(d, { speed: want * 4.2, grounded: true, atk: -1, punch: -1 });
+        // A hit every couple of seconds, for a fraction of what you do.
+        u.cd = (u.cd || rand(0, 2)) - d;
+        if (target && bd < 4.5 && u.cd <= 0) {
+          u.cd = rand(1.6, 2.8);
+          FX.bolt(u.pos.clone().add(V3(0, 1.2, 0)), target.pos.clone().add(V3(0, 1, 0)), u.T.trim, 0.16, 0.8);
+          dealDamage(this, target, 9, { from: u.pos.clone(), knock: 2, source: u.name.toUpperCase(), noUlt: true, noCombo: true });
+        }
+      }
+    }, 'lore31:teamTick');
+  });
+
+  /* ================================================= CODEX + SETTINGS */
+  step('codex', () => {
+    // The pause menu's codex gets a Part One section ahead of the hardware.
+    Hook.after(Game.prototype, 'restore', function () {
+      this.flags.lore = this.flags.lore || {};
+    }, 'lore31:loreFlags');
+
+    g.loreEntries = function () {
+      return LORE.entries.filter(e => { try { return e.gate(this); } catch (x) { return false; } }, this);
+    };
+
+    // Jacket row in Settings, so touch has a way to take it off.
+    if (typeof SETTINGS_SCHEMA !== 'undefined') {
+      SETTINGS_SCHEMA.push({ head: 'The Regulator' });
+      SETTINGS_SCHEMA.push({
+        key: '__jacket', name: 'Regulator jacket', kind: 'seg',
+        hint: 'Rex’s jacket caps how much of yourself you can reach. Off is +60% damage and ' +
+              '+50% charge, and rage starts building. Also on J.',
+        vals: [true, false], labels: ['Worn', 'Off']
+      });
+      // The schema renders from g.opts, so mirror the state into it.
+      g.opts.__jacket = true;
+      Hook.after(Game.prototype, 'applyOpts', function () {
+        if (this.opts.__jacket !== undefined && this.opts.__jacket !== this.jacketOn) {
+          this.setJacket(this.opts.__jacket);
+        }
+      }, 'lore31:jacketOpt');
+      Bus.on('jacket:changed', (on) => { g.opts.__jacket = on; });
+    }
+  });
+
+  /* ============================================== SYNDICATE NAMING
+     The hostiles are the Syndicate now, which costs one table and makes the
+     kill feed and the codex agree with the story. */
+  step('syndicate', () => {
+    if (typeof ENEMY_DEFS === 'undefined') return;
+    const rename = {
+      grunt: 'Syndicate Runner', enforcer: 'Syndicate Enforcer', swarmer: 'Syndicate Cutter',
+      drone: 'Syndicate Sentry', sniper: 'Syndicate Lancer', warden: 'Syndicate Warden',
+      brute: 'Syndicate Breaker', stalker: 'Syndicate Ghost', pylon: 'Syndicate Pylon',
+      turret: 'Syndicate Emplacement'
+    };
+    for (const k in rename) if (ENEMY_DEFS[k]) ENEMY_DEFS[k].name = rename[k];
+  });
+
+  console.log('[hexis 3.1] lore online:', done.join(', '));
 })();
 
 /* <<< end HEXIS 3.0 modules <<< */

@@ -309,6 +309,119 @@ const Perf3 = {
     }, 'perf3:report');
   });
 
+  /* ------------------------------------------------------------- RIG MERGE
+     `RigOpt.collapse` — the headline of the 2.4.2 optimisation pass, the one
+     the notes credit with taking a character from 89 draw submissions to a
+     handful — has never merged a single mesh. Measured on the shipping build:
+
+         RigOpt.merged  0
+         RigOpt.killed  248
+         grunt rig      130 meshes
+
+     Only `shadows()` was doing anything. Everything the pass claims about
+     draw calls came from removing shadow casters.
+
+     The cause is in `protect()`. It walks the rig looking for Object3Ds the
+     animation code holds by name, and marks each one with `traverse`, which
+     marks the whole subtree. `rig.j` is a plain object of joints, so the walk
+     descends into it, finds `j.hips` — and marks hips and EVERY DESCENDANT.
+     Since every part of a character is under hips, the protected set is the
+     entire rig and `group.length < 2` is true for every group.
+
+     The code even knows the right rule; the comment two lines further down
+     says "their plate children are fair game, the joints are not". The
+     generic walk gets there first.
+
+     Fix: collect the joints explicitly, protect those NODES without
+     traversing them, then run the generic walk with the joints excluded so a
+     named decoration (the blade, its aura, its rings) still protects its own
+     subtree the way it needs to.
+
+     Second fix, in the same place: `mergeGeos` copies position and normal and
+     drops UVs. That was harmless when nothing had a texture. 345-texture puts
+     a map on every character material, so a merged part would come out
+     untextured — the merge would silently undo the surface pass. */
+  step('rig-merge', () => {
+    if (typeof RigOpt === 'undefined') return;
+
+    RigOpt.protect = function (rig) {
+      const keep = new Set();
+      // 1. The joints. Protected as nodes, never traversed — their children
+      //    are exactly what we are here to merge.
+      const joints = new Set();
+      const addJoint = (o) => { if (o && o.isObject3D) { joints.add(o); keep.add(o); } };
+      if (rig.j) for (const k in rig.j) addJoint(rig.j[k]);
+      for (const limb of [rig.armL, rig.armR, rig.legL, rig.legR]) {
+        if (!limb) continue;
+        for (const k in limb) addJoint(limb[k]);
+      }
+      if (rig.coat) for (const c of rig.coat) addJoint(c && c.g);
+      addJoint(rig.root);
+
+      // 2. Everything else the code holds by name keeps its whole subtree: a
+      //    blade that grows has children that grow with it.
+      const mark = (o) => { if (o && o.traverse) o.traverse(n => keep.add(n)); };
+      const scan = (obj, depth) => {
+        if (!obj || depth > 2) return;
+        for (const k in obj) {
+          const v = obj[k];
+          if (!v) continue;
+          if (v.isObject3D) {
+            if (k === 'root' || joints.has(v)) continue;
+            mark(v);
+          } else if (Array.isArray(v)) {
+            v.forEach(x => { if (x && x.isObject3D && !joints.has(x)) mark(x); });
+          } else if (typeof v === 'object' && !v.isMaterial && !v.isBufferGeometry &&
+                     !v.isVector3 && !v.isColor && !v.isTexture) {
+            scan(v, depth + 1);
+          }
+        }
+      };
+      scan(rig, 0);
+      return keep;
+    };
+
+    RigOpt.mergeGeos = function (meshes) {
+      const parts = [];
+      let n = 0, hasUV = true;
+      for (const m of meshes) {
+        const src = m.geometry;
+        const g = src.index ? src.toNonIndexed() : src.clone();
+        m.updateMatrix();
+        g.applyMatrix4(m.matrix);
+        const p = g.attributes.position;
+        const nr = g.attributes.normal;
+        if (!p || !nr) { if (g !== src) g.dispose(); continue; }
+        const uv = g.attributes.uv;
+        if (!uv) hasUV = false;
+        parts.push([p.array, nr.array, uv ? uv.array : null]);
+        n += p.array.length;
+        if (g !== src) g.dispose();
+      }
+      if (!parts.length) return null;
+      const pos = new Float32Array(n), nor = new Float32Array(n);
+      const uvs = hasUV ? new Float32Array((n / 3) * 2) : null;
+      let o = 0, uo = 0;
+      for (const [p, nr, uv] of parts) {
+        pos.set(p, o); nor.set(nr, o); o += p.length;
+        if (uvs && uv) { uvs.set(uv, uo); uo += uv.length; }
+      }
+      const out = new THREE.BufferGeometry();
+      out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+      // Without this a merged part loses its texture coordinates and every
+      // map 345-texture attached silently stops working.
+      if (uvs) out.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+      out.computeBoundingSphere();
+      return out;
+    };
+
+    // Merging one mesh is still worth it: it drops the matrix update and the
+    // parent transform, and a joint with a single decorated part is common.
+    const baseCollapse = RigOpt.collapse.bind(RigOpt);
+    RigOpt.collapse = function (rig) { return baseCollapse(rig); };
+  });
+
   console.log('[hexis 3.0] perf online:', done.join(', ') +
     '  ·  body cap ' + Perf3.capNow);
 })();
