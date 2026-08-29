@@ -13,10 +13,16 @@ version = 0.3.0
 requirements = python3,pygame
 orientation = portrait
 fullscreen = 1
+icon.filename = %(source.dir)s/packaging/icon.png
 android.presplash_color = #0b0906
 android.permissions = WAKE_LOCK
 android.archs = arm64-v8a,armeabi-v7a
 android.allow_backup = True
+# Pinned so a CI build is reproducible, and so the SDK licence prompt cannot
+# stall a headless runner.
+android.accept_sdk_license = True
+android.api = 33
+android.minapi = 21
 # Touch input is handled through SDL finger events, so no extra bridge is needed.
 
 [buildozer]

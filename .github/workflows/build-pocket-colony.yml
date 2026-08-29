@@ -9,6 +9,9 @@ name: Build Pocket Colony
 on:
   push:
     tags: ['pc-v*']
+    # Building on the working branch too, so an APK can be pulled from the
+    # Actions tab without publishing anything.
+    branches: ['claude/**']
   workflow_dispatch:
 
 defaults:
@@ -16,7 +19,7 @@ defaults:
     working-directory: games/pocket-colony
 
 jobs:
-  build:
+  desktop:
     strategy:
       fail-fast: false
       matrix:
@@ -92,8 +95,55 @@ jobs:
           name: ${{ matrix.artifact }}
           path: games/pocket-colony/${{ matrix.artifact }}.*
 
+  android:
+    # The APK is built here rather than on a developer machine because the
+    # Android SDK, NDK and a JDK are a multi-gigabyte install.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip openjdk-17-jdk autoconf libtool pkg-config \
+            zlib1g-dev libncurses-dev libffi-dev libssl-dev cmake
+
+      - name: Install buildozer
+        run: python -m pip install --upgrade pip buildozer 'cython<3' virtualenv
+
+      # The SDK, NDK and the compiled Python are worth caching: a cold build
+      # takes the better part of an hour, a warm one a few minutes.
+      - name: Cache the Android toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            games/pocket-colony/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('games/pocket-colony/buildozer.spec') }}
+          restore-keys: buildozer-${{ runner.os }}-
+
+      - name: Build the APK
+        run: buildozer -v android debug
+
+      - name: Name the APK
+        shell: bash
+        run: |
+          mkdir -p out
+          cp bin/*.apk out/PocketColony-0.3.0-android.apk
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketColony-android
+          path: games/pocket-colony/out/*.apk
+
   release:
-    needs: build
+    needs: [desktop, android]
     if: startsWith(github.ref, 'refs/tags/pc-v')
     runs-on: ubuntu-latest
     permissions:
