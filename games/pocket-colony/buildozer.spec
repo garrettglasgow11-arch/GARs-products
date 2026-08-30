@@ -13,7 +13,11 @@ version = 0.3.0
 # pygame is pinned: python-for-android builds against a recent CPython, and
 # pygame before 2.5.2 includes longintrepr.h unguarded - a header CPython moved
 # in 3.11 and removed later, so older pygame cannot compile against it.
-requirements = python3,pygame==2.6.1
+# cython is listed so python-for-android installs it for the hostpython it
+# builds pygame with. Installing cython on the build machine is not enough:
+# p4a runs pygame's setup.py under its own hostpython, which has its own
+# site-packages, and pygame regenerates its _sdl2 Cython sources at build time.
+requirements = python3,cython,pygame==2.6.1
 orientation = portrait
 fullscreen = 1
 icon.filename = %(source.dir)s/packaging/icon.png
