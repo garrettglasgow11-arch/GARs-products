@@ -75,12 +75,29 @@ const Sculpt = {
      stops reading as faceted at the distance the camera actually sits; seven
      is where it stops on a phone screen. Going to twelve cost 40% more
      triangles for a difference that needed photo mode to see. */
-  get seg() { return Input.touch ? 7 : 10; },
+  /* v3.3 raised these. Ten sides is where a forearm stops reading as faceted
+     from across a street, but the camera in this game sits two metres behind
+     the player's shoulder, and at that range you can count the sides. The
+     merge collapses everything to one draw per material either way, so the
+     only cost is triangles, and the budget had room. */
+  /* One switch for every geometry budget below. Phones take the cheap path,
+     and so does anyone who has turned quality down — the smoothing is the
+     most expensive thing in the sculptor and it is the first thing to go. */
+  get lowSpec() {
+    const o = window.HEXIS && window.HEXIS.opt;
+    return !!Input.touch || (o && o.quality === 'low');
+  },
+  get seg() { return this.lowSpec ? 9 : 16; },
   /* Joint balls get half the rings of a full sphere. They are only ever seen
      as the round bit of an elbow. */
-  get ring() { return Input.touch ? 4 : 5; },
+  get ring() { return this.lowSpec ? 5 : 8; },
   // Faces are looked at from a metre away; knees are not.
-  get faceSeg() { return Input.touch ? 10 : 16; },
+  get faceSeg() { return this.lowSpec ? 12 : 20; },
+  /* How many points to resample a lathe profile to, as a multiple of the
+     control points it was written with. 1 is off, and that is what phones
+     get: the smoothing is what turns six control points into a continuous
+     curve, and it is the single most expensive thing in the sculptor. */
+  get smoothing() { return this.lowSpec ? 1 : 2.4; },
   coatFar: 28 * 28
 };
 
@@ -98,13 +115,94 @@ const Sculpt = {
   /* A surface of revolution from a profile of [radius, height] pairs, with an
      optional depth squash so a cross-section can be an oval rather than a
      circle — which is what a chest, a forearm and a skull all actually are. */
+  /* Resample a profile along a Catmull-Rom spline through its own points.
+
+     A profile written as a handful of [radius, height] pairs revolves into a
+     surface with a crease at every one of those pairs, because the segments
+     between them are straight. On a chest that is six hard rings stacked up
+     the torso; the eye reads it as panelling, and the character looks like it
+     was folded rather than sculpted. Running the same control points through
+     a spline turns each corner into a curve, `computeVertexNormals` then has
+     something continuous to average, and the shading goes smooth without
+     touching a single number in the profiles themselves. */
+  function smoothProfile(profile, per) {
+    const k = per || Sculpt.smoothing;
+    if (k <= 1.01 || profile.length < 3) return profile;
+    const pts = profile.map(p => new THREE.Vector3(p[0], p[1], 0));
+    /* Centripetal, not uniform. A uniform Catmull-Rom overshoots at a sharp
+       corner — on a shoulder that puts the bulge outside the silhouette the
+       profile asked for, and at an apex it swings the radius negative and
+       pinches. Centripetal parameterisation cannot self-intersect. */
+    const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal', 0.5);
+    const n = Math.max(profile.length - 1, Math.round((profile.length - 1) * k));
+    return curve.getPoints(n).map(v => [Math.max(0.0001, v.x), v.y]);
+  }
+
+  /* Curl the ends of a profile inward.
+
+     A lathe is an open tube: wherever the profile stops, the surface stops,
+     and you see a raw polygon ring edge-on. On a sleeve cuff, a pauldron rim
+     or a collar that ring is a hard bright line that reads as torn card. A
+     short return at each end turns it into a rolled hem, which is what a real
+     garment or a real piece of armour does anyway. */
+  function rollEnds(profile, r, both) {
+    const out = profile.slice();
+    const roll = (i, dir) => {
+      const a = out[i], b = out[i + dir];
+      const dx = a[0] - b[0], dy = a[1] - b[1];
+      const L = Math.hypot(dx, dy) || 1;
+      const ux = dx / L, uy = dy / L;            // outward along the profile
+      // Two points that arc over the rim and tuck back inside.
+      return [
+        [a[0] + ux * r * 0.55 - uy * r * 0.30, a[1] + uy * r * 0.55 + ux * r * 0.30],
+        [a[0] + ux * r * 0.30 - uy * r * 0.95, a[1] + uy * r * 0.30 + ux * r * 0.95]
+      ];
+    };
+    const tail = roll(out.length - 1, -1);
+    out.push(tail[0], tail[1]);
+    if (both) {
+      const head = roll(0, 1);
+      out.unshift(head[1], head[0]);
+    }
+    return out;
+  }
+
   function lathe(profile, mat, opts = {}) {
-    const pts = profile.map(p => V2(Math.max(0.0001, p[0]), p[1]));
+    let src = profile;
+    if (opts.roll) src = rollEnds(src, opts.roll, opts.rollBoth);
+    if (opts.smooth !== false) src = smoothProfile(src, opts.smooth === true ? 3 : opts.smooth);
+    const pts = src.map(p => V2(Math.max(0.0001, p[0]), p[1]));
     const geo = new THREE.LatheGeometry(pts, opts.seg || Sculpt.seg,
       opts.phiStart || 0, opts.phiLength || Math.PI * 2);
     if (opts.squash && opts.squash !== 1) geo.scale(1, 1, opts.squash);
     if (opts.wide && opts.wide !== 1) geo.scale(opts.wide, 1, 1);
     geo.computeVertexNormals();
+    /* Weld the seam.
+
+       A full 360-degree lathe duplicates its first column of vertices at the
+       end so the UVs can run 0..1. computeVertexNormals treats those two
+       columns as different vertices, so each one only averages the faces on
+       its own side and the normals disagree — which draws a hard crease down
+       the surface. On a head that crease lands straight down the middle of
+       the face. Copying the averaged normal across both columns costs one
+       pass over a strip of vertices and removes it everywhere. */
+    if (!opts.phiLength || Math.abs(opts.phiLength - Math.PI * 2) < 1e-6) {
+      const seg = opts.seg || Sculpt.seg;
+      const rows = pts.length;
+      const nrm = geo.attributes.normal;
+      const stride = seg + 1;
+      for (let r = 0; r < rows; r++) {
+        const a = r * stride, b = a + seg;
+        if (b >= nrm.count) break;
+        const nx = (nrm.getX(a) + nrm.getX(b)) * 0.5;
+        const ny = (nrm.getY(a) + nrm.getY(b)) * 0.5;
+        const nz = (nrm.getZ(a) + nrm.getZ(b)) * 0.5;
+        const L = Math.hypot(nx, ny, nz) || 1;
+        nrm.setXYZ(a, nx / L, ny / L, nz / L);
+        nrm.setXYZ(b, nx / L, ny / L, nz / L);
+      }
+      nrm.needsUpdate = true;
+    }
     const m = new THREE.Mesh(geo, mat);
     if (opts.pos) m.position.set(opts.pos[0], opts.pos[1], opts.pos[2]);
     if (opts.rot) m.rotation.set(opts.rot[0] || 0, opts.rot[1] || 0, opts.rot[2] || 0);
@@ -316,13 +414,17 @@ const Sculpt = {
     j.hips.position.y = 0.92 * S0 * B.size * B.stance;
     const wR = 0.162 * S * B.waist;
     j.hips.add(lathe([
-      [wR * 0.67, -0.16 * S], [wR * 0.93, -0.10 * S], [wR, 0.0],
-      [wR * 0.93, 0.06 * S], [wR * 0.77, 0.10 * S]
-    ], m.dark, { squash: 0.80 }));
+      [wR * 0.62, -0.19 * S], [wR * 0.88, -0.12 * S], [wR, -0.01 * S],
+      [wR * 0.95, 0.06 * S], [wR * 0.80, 0.12 * S]
+    ], m.dark, { squash: 0.80, roll: 0.014 * S }));
+    // One belt, rolled at both edges so it reads as a band around the hips
+    // rather than a ring stuck on them.
     j.hips.add(lathe([
-      [wR, 0.02 * S], [wR * 1.07, 0.05 * S], [wR * 1.07, 0.10 * S], [wR, 0.13 * S]
-    ], m.armor, { squash: 0.82 }));
-    j.hips.add(chip(0.09 * S, 0.068 * S, 0.045 * S, m.trim, 0, 0.075 * S, wR * 0.82, 0.3));
+      [wR * 1.02, 0.015 * S], [wR * 1.06, 0.055 * S], [wR * 1.02, 0.100 * S]
+    ], m.armor, { squash: 0.82, roll: 0.012 * S, rollBoth: true }));
+    // Buckle.
+    const bk = soft(0.086 * S, 0.062 * S, 0.030 * S, m.trim, 0, 0.058 * S, wR * 0.86, 0.42);
+    j.hips.add(bk);
 
     /* --- layering rails --------------------------------------------------
        Two rules, and v4 broke both of them everywhere.
@@ -408,64 +510,73 @@ const Sculpt = {
       jk.material = twoSided(m.cloth);
       j.chest.add(jk);
 
-      /* Lapels: partial lathes riding the jacket's own curve, one clearance
-         out. v4 used flat boxes, which cut through the jacket at the sides
-         and read as two white planks nailed to the chest. */
+      /* The facing: a strip up each side of the opening, plus a collar ring
+         that overlaps their tops.
+
+         The version before this tried to do it as one lathe running from the
+         chest radius up to the neck radius. A lathe's radius at a given
+         height applies all the way round, so that swept a great pale cone
+         across the upper chest. A front opening is a vertical strip at a
+         fixed angle — the profile has to follow the JACKET's radius, and the
+         collar has to be its own ring. Both ends of everything are rolled, so
+         there is no cut edge for the camera to find. */
       for (const side of [-1, 1]) {
-        const lp = lathe([
-          [jkR(0.30 * S) + TRIM * 0.9, 0.300 * S],
-          [jkR(0.40 * S) + TRIM * 1.4, 0.400 * S],
-          [jkR(0.49 * S) + TRIM * 1.5, 0.490 * S],
-          [jkR(0.56 * S) + TRIM * 1.0, 0.562 * S]
-        ], m.dark, {
-          squash: SQT,
-          phiStart: side > 0 ? open / 2 - 0.02 : -open / 2 - 0.28,
-          phiLength: 0.30
+        const st = [];
+        for (let y = 0.10; y <= 0.60; y += 0.05) st.push([jkR(y * S) + TRIM * 1.1, y * S]);
+        const strip = lathe(st, m.dark, {
+          squash: SQT, seg: TSEG, roll: TRIM * 1.6, rollBoth: true,
+          phiStart: side > 0 ? open / 2 - 0.07 : -open / 2 - 0.26,
+          phiLength: 0.33
         });
-        lp.material = twoSided(m.dark);
-        j.chest.add(lp);
+        strip.material = twoSided(m.dark);
+        j.chest.add(strip);
       }
 
-      /* Collar: rises, then folds back down. The fold is what closes the rim
-         — an open-top lathe let you look straight down the neck. */
-      const cR = nkR * 1.30 + CLOTH;
+      /* Collar: rises off the trapezius, folds back down. The fold closes the
+         rim, and its two cut ends sit behind the tops of the strips. */
+      const cR = nkR * 1.28 + CLOTH;
       const col = lathe([
-        [cR * 0.98, 0.590 * S], [cR * 1.06, 0.652 * S], [cR * 1.02, 0.702 * S],
-        [cR * 0.90, 0.696 * S], [cR * 0.94, 0.604 * S]
-      ], m.cloth, {
-        squash: 0.90, phiStart: open / 2 + 0.16, phiLength: Math.PI * 2 - open - 0.32
+        [cR * 0.96, 0.588 * S], [cR * 1.06, 0.650 * S], [cR * 1.02, 0.702 * S],
+        [cR * 0.88, 0.694 * S], [cR * 0.92, 0.600 * S]
+      ], m.dark, {
+        squash: 0.90, seg: TSEG,
+        phiStart: open / 2 + 0.02, phiLength: Math.PI * 2 - open - 0.04
       });
-      col.material = twoSided(m.cloth);
+      col.material = twoSided(m.dark);
       j.chest.add(col);
 
-      // Zip: sits in the OPENING, on the shirt, so it never touches the
-      // jacket surface at all.
-      j.chest.add(chip(0.011 * S, 0.46 * S, 0.018 * S, m.armor,
-        0, 0.28 * S, (chR + 0.004 * S) * SQT, 0.3));
-      for (const side of [-1, 1]) {
-        const pk = chip(0.070 * S, 0.052 * S, 0.026 * S, m.armor,
-          side * 0.105 * S, 0.135 * S, jkR(0.135 * S) * SQT + 0.004 * S, 0.3);
-        pk.rotation.y = side * -0.30;
-        j.chest.add(pk);
-      }
+      // Zip: one slim dark ridge on the shirt inside the opening. Rolling a
+      // 0.11-radian partial lathe flared its ends into a bright wedge under
+      // the chin — a roll needs enough arc to be a roll.
+      j.chest.add(chip(0.016 * S, 0.44 * S, 0.014 * S, m.dark,
+        0, 0.28 * S, (chR + 0.003 * S) * SQT, 0.5));
+      // Pockets: one band across the hem rather than two little tabs that
+      // read as arrowheads from anywhere but straight on.
+      j.chest.add(lathe(grow([
+        [jkR(0.10 * S), 0.10 * S], [jkR(0.17 * S), 0.17 * S]
+      ], TRIM), m.armor, {
+        squash: SQT, seg: TSEG, roll: TRIM,
+        phiStart: open / 2 + 0.30, phiLength: Math.PI * 2 - open - 0.60
+      }));
     }
 
-    // Collarbones: on the garment, one clearance out, and short enough to
-    // stay off the deltoid line.
-    for (const side of [-1, 1]) {
-      const cb = chip(shR * 0.50, 0.020 * S, 0.040 * S, m.armor,
-        side * shR * 0.40, 0.548 * S,
-        (jacket ? jkR(0.548 * S) : shR * 0.72) * SQT * 0.62 + PLATE, 0.35);
-      cb.rotation.z = side * -0.12;
-      cb.rotation.y = side * -0.18;
-      j.chest.add(cb);
-    }
+    /* The collarbone bars are gone. They were two dark boxes floating at the
+       base of the neck and no amount of rotating them made them read as
+       anatomy — the trapezius bend is already in the torso profile. */
 
     if (rig.hex && rig.hex.parent && !rig.hex.__resized) {
       rig.hex.__resized = true;
       rig.hex.geometry.dispose();
-      rig.hex.geometry = new THREE.CylinderGeometry(0.062 * S, 0.062 * S, 0.030 * S, 6);
-      rig.hex.position.set(0, 0.42 * S, (chR + 0.006 * S) * SQT + 0.010 * S);
+      rig.hex.geometry = new THREE.CylinderGeometry(0.038 * S, 0.052 * S, 0.030 * S, 6);
+      rig.hex.position.set(0, 0.42 * S, (chR + 0.006 * S) * SQT + 0.016 * S);
+      // A bevelled housing behind it. A flat hexagon on a curved chest reads
+      // as a sticker; a ring around it reads as a fitting.
+      const hz = (chR + 0.006 * S) * SQT;
+      const ring = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.082 * S, 0.094 * S, 0.030 * S, 20), m.armor);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(0, 0.42 * S, hz + 0.004 * S);
+      j.chest.add(ring);
     }
 
     if (rig.__tier > 0 && j.chest) {
@@ -485,7 +596,7 @@ const Sculpt = {
        skull alone was a fifth of standing height before the hair went on.
        1.12 lands around 1/6.4 with hair, which is the stylised-but-not-silly
        band Fortnite sits in. */
-    const H = 1.12 * B.head;
+    const H = 1.18 * B.head;
     const nR = nkR;
     j.head.add(lathe([
       [nR * 0.96, -0.055 * S], [nR * 1.06, 0.010 * S],
@@ -539,9 +650,9 @@ const Sculpt = {
       if (arm.hand) strip(arm.hand, keep);
 
       arm.sh.position.set(side * 0.252 * S0 * B.shoulder * 0.92, 0.520 * S, 0);
-      const upR = 0.073 * S * B.arm;
-      const elR = 0.055 * S * B.arm;
-      const wrR = 0.045 * S * B.arm;
+      const upR = 0.078 * S * B.arm;
+      const elR = 0.059 * S * B.arm;
+      const wrR = 0.048 * S * B.arm;
       const upL = 0.290 * S * B.ape;
       const foL = 0.262 * S * B.ape;
       arm.el.position.y = -upL;
@@ -560,31 +671,36 @@ const Sculpt = {
         [elR * 1.06, -upL],
         [elR * 0.92, -upL - 0.022 * S]
       ];
-      arm.sh.add(lathe(UP, m.suit, { squash: SQA, seg: LSEG }));
+      /* ONE visible surface on the upper arm.
 
+         v3.2 put a suit form, a sleeve stopping mid-bicep and a pauldron cap
+         on top of each other, each ending in its own open rim. Three nested
+         tongues hanging off the shoulder, and once the profiles were smoothed
+         those rims rounded over and read as a stack of banana peels. A sleeve
+         now covers the whole upper arm and the suit under it is only there
+         for the gap at the elbow. */
       if (jacket) {
-        // Sleeve: the same surface a clothing-thickness out, stopping short
-        // of the elbow so the cuff edge reads as a hem.
-        const SL = grow(UP.slice(1, 6), CLOTH);
-        SL.push([elR * 1.20 + CLOTH * 0.7, -upL * 0.80]);
-        SL.push([elR * 1.14 + CLOTH * 0.2, -upL * 0.82]);
-        arm.sh.add(lathe(SL, m.cloth, { squash: SQA, seg: LSEG }));
+        arm.sh.add(lathe(UP.slice(3), m.suit, { squash: SQA, seg: LSEG }));
+        const SL = grow(UP, CLOTH);
+        arm.sh.add(lathe(SL, m.cloth, {
+          squash: SQA, seg: LSEG, roll: CLOTH * 1.5
+        }));
+      } else {
+        arm.sh.add(lathe(UP, m.suit, { squash: SQA, seg: LSEG, roll: 0.012 * S }));
       }
       if (cfg.pauldron) {
-        /* A cap that sits ON the shoulder, not a wing off it. v4 ran to
-           1.95x the arm radius, which put the outer edge nearly twice the
-           torso's own half-width out on each side. */
+        /* A cap that sits ON the shoulder and rolls under, not a plate with a
+           cut edge. Its bottom rim is inside the sleeve, so the two forms read
+           as one shoulder rather than two shells. */
         const base = (jacket ? upR * 1.20 + CLOTH : upR * 1.20);
         const pd = lathe([
-          [base * 0.42, 0.118 * S],
-          [base * 1.02 + PLATE, 0.062 * S],
-          [base * 1.16 + PLATE, -0.014 * S],
-          [base * 1.10 + PLATE, -0.086 * S],
-          [base * 0.96 + PLATE, -0.098 * S]
-        ], m.armor, { squash: 0.90, seg: LSEG });
+          [base * 0.30, 0.128 * S],
+          [base * 0.86 + PLATE, 0.090 * S],
+          [base * 1.10 + PLATE, 0.022 * S],
+          [base * 1.13 + PLATE, -0.048 * S],
+          [base * 1.02, -0.092 * S]
+        ], m.armor, { squash: 0.92, seg: LSEG, roll: PLATE * 1.4 });
         arm.sh.add(pd);
-        arm.sh.add(chip(0.030 * S, 0.011 * S, 0.10 * S, m.trim,
-          side * base * 0.86, 0.060 * S, 0, 0.35));
       }
 
       /* Forearm, elbow included in the profile, and a gaunttlet over the
@@ -599,16 +715,16 @@ const Sculpt = {
         [wrR * 0.86, -foL - 0.016 * S]
       ];
       arm.el.add(lathe(FO, m.suit, { squash: SQA, seg: LSEG }));
-      arm.el.add(lathe(grow(FO.slice(3, 6), PLATE), m.armor, { squash: SQA, seg: LSEG }));
-      for (let i = 0; i < 3; i++) {
-        arm.el.add(chip(0.009 * S, 0.009 * S, 0.018 * S, m.trim,
-          (-0.017 + i * 0.017) * S, -foL * 0.70,
-          (wrR + PLATE) * SQA + 0.006 * S, 0.3));
-      }
+      arm.el.add(lathe(grow(FO.slice(2, 6), PLATE), m.armor,
+        { squash: SQA, seg: LSEG, roll: PLATE * 1.3, rollBoth: true }));
+      // One deliberate band, not three floating dots. At two metres the dots
+      // read as dirt on the lens.
+      arm.el.add(lathe(grow(FO.slice(3, 5), PLATE + TRIM), m.trim,
+        { squash: SQA, seg: LSEG, roll: TRIM }));
 
       if (arm.hand) {
         arm.hand.position.y = -foL - 0.018 * S;
-        buildHand(rig, arm, side, m, S * (0.94 + B.arm * 0.06));
+        buildHand(rig, arm, side, m, S * (1.00 + B.arm * 0.08));
       }
     }
 
@@ -621,9 +737,9 @@ const Sculpt = {
       strip(leg.ft, keep);
 
       leg.hip.position.set(side * 0.118 * S0 * B.waist, -0.06 * S, 0);
-      const thR = 0.096 * S * B.leg;
-      const knR = 0.070 * S * B.leg;
-      const anR = 0.052 * S * B.leg;
+      const thR = 0.103 * S * B.leg;
+      const knR = 0.075 * S * B.leg;
+      const anR = 0.056 * S * B.leg;
       const thL = 0.43 * S, cfL = 0.39 * S;
       leg.kn.position.y = -thL;
       leg.ft.position.y = -cfL;
@@ -640,8 +756,8 @@ const Sculpt = {
       leg.hip.add(lathe(TH, m.suit, { squash: SQL, seg: LSEG }));
       // Outseam, in the gap between thigh and any plate: a dark line that
       // gives the leg a front and a side.
-      leg.hip.add(chip(0.010 * S, 0.34 * S, 0.010 * S, m.dark,
-        side * (thR * 1.06 + 0.004 * S), -thL * 0.42, 0.02 * S, 0.3));
+      leg.hip.add(chip(0.012 * S, 0.32 * S, 0.012 * S, m.dark,
+        side * (thR * 1.02), -thL * 0.42, 0.02 * S, 0.5));
 
       /* Calf lives in the shin profile as a back-heavy bulge rather than a
          separate blob hung off the rear. */
@@ -659,9 +775,10 @@ const Sculpt = {
         [knR * 0.80, -cfL * 0.16], [knR * 1.02, -cfL * 0.36], [knR * 0.72, -cfL * 0.60]
       ], m.suit, { squash: 0.70, pos: [0, 0, -knR * 0.42] }));
       // Kneepad: one plate clearance over the knee bend of the shin.
-      leg.kn.add(lathe(grow(CF.slice(1, 4), PLATE), m.armor, { squash: SQL, seg: LSEG }));
+      leg.kn.add(lathe(grow(CF.slice(1, 4), PLATE), m.armor,
+        { squash: SQL, seg: LSEG, roll: PLATE * 1.3, rollBoth: true }));
 
-      buildBoot(leg.ft, m, S * (0.94 + B.leg * 0.06));
+      buildBoot(leg.ft, m, S * (1.00 + B.leg * 0.08));
     }
 
     /* --- long coat ------------------------------------------------------ */
@@ -763,11 +880,26 @@ const Sculpt = {
       return 0;
     }
     const sx = (y) => surf(y) * SK.sx;
-    const sz = (y) => surf(y) * SK.sz;
+    /* Depth of the skull surface at a given height AND a given distance off
+       the centre line.
+
+       v3.2 used the centre-line depth for every feature, which is only right
+       for the ones actually on the centre. A head is a surface of revolution:
+       at the eye's x offset the skull has already fallen away, so an eye
+       placed at centre-line depth bulges out as a white golf ball, while the
+       nose and mouth — which really are on the centre — end up buried inside
+       and vanish. Both were happening at once, which is why the face read as
+       an egg with two eyes stuck on it. */
+    const szAt = (y, x) => {
+      const r = surf(y);
+      const q = Math.max(0, r * r - (x || 0) * (x || 0));
+      return Math.sqrt(q) * SK.sz;
+    };
+    const sz = (y) => szAt(y, 0);
 
     const U = S * H;                       // one head unit
     const browY = SK.y + 0.062 * U;
-    const eyeY = SK.y + 0.036 * U;
+    const eyeY = SK.y + 0.030 * U;
     const noseY = SK.y - 0.004 * U;
     const mouthY = SK.y - 0.062 * U;
     const chinY = SK.y - 0.104 * U;
@@ -789,35 +921,38 @@ const Sculpt = {
          pebble glued to the face. */
       const jw = ball(0.056 * U, skin, 0, 1, FS);
       jw.scale.set(0.66, 0.80, 0.94);
-      jw.position.set(side * sx(mouthY) * 0.44, mouthY - 0.012 * U, sz(mouthY) * 0.06);
+      const jwX = sx(mouthY) * 0.44;
+      jw.position.set(side * jwX, mouthY - 0.012 * U, szAt(mouthY, jwX) * 0.10);
       j.head.add(jw);
 
       const ck = ball(0.042 * U, skin, 0, 1, FS);
       ck.scale.set(0.94, 0.66, 0.72);
-      ck.position.set(side * sx(eyeY) * 0.44, eyeY - 0.034 * U, sz(eyeY) * 0.44);
+      const ckX = sx(eyeY) * 0.44;
+      ck.position.set(side * ckX, eyeY - 0.034 * U, szAt(eyeY, ckX) * 0.58);
       j.head.add(ck);
 
       // Brow ridge: a swell over the eye, not a bar in front of it.
       const br = ball(0.048 * U, skin, 0, 1, FS);
       br.scale.set(0.98, 0.40, 0.60);
-      br.position.set(side * sx(browY) * 0.34, browY - 0.004 * U, sz(browY) * 0.48);
+      const brX = sx(browY) * 0.34;
+      br.position.set(side * brX, browY - 0.004 * U, szAt(browY, brX) * 0.62);
       j.head.add(br);
     }
 
     // Nose: a bridge running down off the brow, then a tip.
-    const bridge = ball(0.024 * U, skin, 0, 1, FS);
-    bridge.scale.set(0.58, 2.05, 1.00);
-    bridge.position.set(0, (browY + noseY) / 2, sz(noseY) * 0.74);
+    const bridge = ball(0.022 * U, skin, 0, 1, FS);
+    bridge.scale.set(0.54, 2.15, 0.92);
+    bridge.position.set(0, (browY + noseY) / 2, sz((browY + noseY) / 2) * 0.86);
     j.head.add(bridge);
-    const tip = ball(0.018 * U, skin, 0, 1, FS);
-    tip.scale.set(1.14, 0.86, 1.08);
-    tip.position.set(0, noseY - 0.008 * U, sz(noseY) * 0.86);
+    const tip = ball(0.016 * U, skin, 0, 1, FS);
+    tip.scale.set(1.20, 0.90, 1.05);
+    tip.position.set(0, noseY - 0.010 * U, sz(noseY) * 0.97);
     j.head.add(tip);
 
     for (const side of [-1, 1]) {
       const ear = ball(0.032 * U, skin, 0, 1, FS);
       ear.scale.set(0.32, 1.18, 0.82);
-      ear.position.set(side * sx(eyeY) * 0.94, eyeY - 0.014 * U, -0.012 * U);
+      ear.position.set(side * sx(eyeY) * 0.92, eyeY - 0.014 * U, -0.012 * U);
       ear.rotation.z = side * -0.10;
       j.head.add(ear);
     }
@@ -828,30 +963,47 @@ const Sculpt = {
     const iris = rig.eyeIris || (rig.eyeIris = new THREE.MeshBasicMaterial({
       color: cfg.eye || cfg.trim || '#5FE3FF', fog: false
     }));
-    const eyeR = 0.031 * U;
-    const eyeX = sx(eyeY) * 0.50;
-    // Set the ball INTO the head: only the front cap of it clears the skin.
-    const eyeZ = sz(eyeY) * 0.80 - eyeR * 0.30;
+    const eyeR = 0.0225 * U;
+    const eyeX = sx(eyeY) * 0.455;
+    /* Set the ball into a socket, measured where the socket actually is. At
+       this x the skull has already curved away by about a tenth of its
+       radius, so using the centre-line depth pushed the whole eyeball out
+       through the skin. */
+    const eyeZ = szAt(eyeY, eyeX) - eyeR * 0.62;
     rig.eyes = [];
     rig.lids = [];
+    const dark = rig.faceMouth || m.dark;
     for (const side of [-1, 1]) {
+      /* A socket first. Without something darker behind it the white sits on
+         the skin as a pale blob and the whole eye disappears into the face —
+         which is exactly what v3.2 shipped: two featureless ovals. */
+      const sock = ball(eyeR * 1.22, dark, 0, 1, FS);
+      sock.scale.set(1.16, 0.88, 0.40);
+      sock.position.set(side * eyeX, eyeY, eyeZ - eyeR * 0.10);
+      j.head.add(sock);
+
       const e = ball(eyeR, white, 0, 1, FS);
-      e.scale.set(1.14, 0.84, 0.66);
+      e.scale.set(1.10, 0.86, 0.62);
       e.position.set(side * eyeX, eyeY, eyeZ);
       j.head.add(e);
 
-      /* Iris as a shallow ball nested just proud of the white, not a flat
-         disc floating at the equator. A disc on a sphere at 2mm is the single
+      /* Iris and pupil as shallow balls nested just proud of the white, not
+         flat discs floating at the equator. A disc on a sphere at 2mm is the
          worst z-fight in the whole rig and it lands on the character's eyes. */
-      const ir = ball(eyeR * 0.56, iris, 0, 1, FS);
-      ir.scale.set(1.0, 1.0, 0.46);
-      ir.position.set(side * eyeX, eyeY, eyeZ + eyeR * 0.62);
+      const ir = ball(eyeR * 0.62, iris, 0, 1, FS);
+      ir.scale.set(1.0, 1.0, 0.40);
+      ir.position.set(side * eyeX, eyeY - eyeR * 0.04, eyeZ + eyeR * 0.50);
       j.head.add(ir);
       rig.eyes.push(ir);
+      const pu = ball(eyeR * 0.30, dark, 0, 1, FS);
+      pu.scale.set(1.0, 1.0, 0.36);
+      pu.position.set(side * eyeX, eyeY - eyeR * 0.04, eyeZ + eyeR * 0.66);
+      j.head.add(pu);
 
-      const lid = ball(eyeR * 1.06, skin, 0, 1, FS);
-      lid.scale.set(1.20, 0.46, 0.80);
-      lid.position.set(side * eyeX, eyeY + eyeR * 0.68, eyeZ - eyeR * 0.10);
+      // Upper lid: a hood over the top third, not a shutter over the whole eye.
+      const lid = ball(eyeR * 1.10, skin, 0, 1, FS);
+      lid.scale.set(1.16, 0.34, 0.86);
+      lid.position.set(side * eyeX, eyeY + eyeR * 0.80, eyeZ - eyeR * 0.14);
       j.head.add(lid);
       rig.lids.push(lid);
     }
@@ -859,8 +1011,8 @@ const Sculpt = {
     rig.brows = [];
     for (const side of [-1, 1]) {
       const b2 = ball(0.030 * U, rig.faceHair || m.dark, 0, 1, FS);
-      b2.scale.set(1.55, 0.34, 0.52);
-      b2.position.set(side * eyeX, eyeY + eyeR * 1.28, sz(browY) * 0.80);
+      b2.scale.set(1.45, 0.32, 0.50);
+      b2.position.set(side * eyeX, eyeY + eyeR * 1.45, szAt(browY, eyeX) * 0.94);
       b2.rotation.z = side * -0.16;
       j.head.add(b2);
       rig.brows.push(b2);
@@ -871,18 +1023,16 @@ const Sculpt = {
     const lipMat = rig.faceLip || (rig.faceLip = new THREE.MeshStandardMaterial({
       color: cfg.lip || '#a3675c', roughness: 0.62, metalness: 0
     }));
-    const mz = sz(mouthY) * 0.90;
-    const upper = ball(0.021 * U, lipMat, 0, 1, FS);
-    upper.scale.set(1.95, 0.38, 0.54);
-    upper.position.set(0, mouthY + 0.008 * U, mz);
-    j.head.add(upper);
-    const lower = ball(0.020 * U, lipMat, 0, 1, FS);
-    lower.scale.set(1.70, 0.44, 0.54);
-    lower.position.set(0, mouthY - 0.008 * U, mz);
-    j.head.add(lower);
-    const line = ball(0.019 * U, rig.faceMouth || m.dark, 0, 1, FS);
-    line.scale.set(2.05, 0.15, 0.44);
-    line.position.set(0, mouthY, mz + 0.004 * U);
+    /* One mouth mass with a line through it. Three stacked lips read as
+       three stacked lips — you could count them from two metres. */
+    const mz = sz(mouthY) * 0.94;
+    const lips = ball(0.026 * U, lipMat, 0, 1, FS);
+    lips.scale.set(1.85, 0.60, 0.50);
+    lips.position.set(0, mouthY, mz);
+    j.head.add(lips);
+    const line = ball(0.022 * U, rig.faceMouth || m.dark, 0, 1, FS);
+    line.scale.set(1.90, 0.12, 0.44);
+    line.position.set(0, mouthY, mz + 0.008 * U);
     j.head.add(line);
 
     if (cfg.mask) {
@@ -923,7 +1073,7 @@ const Sculpt = {
        cannot swallow the eyes. The previous cut started at the temple line and
        the whole upper face disappeared under it, with the brow and cheek
        masses poking back out through the fringe as pale hexagons. */
-    const HL = 0.072 * U;                          // hairline height, skull-local
+    const HL = 0.086 * U;                          // hairline height, skull-local
     const cap = [];
     for (let yl = HL; yl <= 0.140 * U; yl += 0.022 * U) cap.push([r(yl) + T, SK.y + yl]);
     cap.push([r(0.150 * U) * 0.55 + T, SK.y + 0.150 * U]);
@@ -946,58 +1096,81 @@ const Sculpt = {
        over the brow has to be rotated most of the way over — anything short of
        ~2.8 rad leaves it jutting out of the crown like a horn, which is what
        v5 shipped. Everything here hangs from the hairline forward edge. */
-    const topY = SK.y + HL, frontZ = r(HL) * SK.sz;
-    const styles = {
-      /* taper() is built ROOT-DOWN — it already hangs at zero rotation. Every
-         version up to v8 pitched the fringe by ~2.9 rad "so it would hang",
-         which flipped each strand up out of the crown; the character shipped
-         with a mohawk of horns and a bald forehead for four rounds. Positive
-         pitch swings the tip backwards, so a fringe leaning over the brow is
-         a small NEGATIVE number. */
-      // x, y-from-hairline, z-from-front, halfWidth, length, rollZ, pitchX, lit
-      /* Strands are wider than their spacing on purpose: at 0.058 wide on a
-         0.046 pitch they stood apart as separate blades and the fringe read
-         as a row of spikes. Overlapping them makes one mass with cut edges,
-         which is what hair looks like at this level of stylisation. */
-      swept: [
-        [0.000, 0.030, 0.004, 0.082, 0.090, 0.00, -0.30, 1],
-        [0.046, 0.028, 0.000, 0.070, 0.082, -0.16, -0.26, 1],
-        [-0.046, 0.028, 0.000, 0.070, 0.082, 0.16, -0.26, 0],
-        [0.080, 0.020, -0.016, 0.058, 0.070, -0.30, -0.18, 0],
-        [-0.080, 0.020, -0.016, 0.058, 0.070, 0.30, -0.18, 0],
-        [0.030, 0.048, -0.030, 0.066, 0.108, -0.08, -0.42, 1],
-        [-0.030, 0.048, -0.030, 0.066, 0.108, 0.08, -0.42, 0]
-      ],
-      crop: [
-        [0.000, 0.026, 0.002, 0.090, 0.050, 0.00, -0.22, 1],
-        [0.054, 0.022, -0.006, 0.072, 0.046, -0.14, -0.16, 0],
-        [-0.054, 0.022, -0.006, 0.072, 0.046, 0.14, -0.16, 0]
-      ],
-      long: [
-        [0.000, 0.026, 0.004, 0.092, 0.100, 0.00, -0.28, 1],
-        [0.050, 0.024, -0.002, 0.070, 0.092, -0.18, -0.22, 1],
-        [-0.050, 0.024, -0.002, 0.070, 0.092, 0.18, -0.22, 0],
-        [0.094, -0.030, -0.058, 0.046, 0.200, -0.26, 0.20, 0],
-        [-0.094, -0.030, -0.058, 0.046, 0.200, 0.26, 0.20, 0],
-        [0.000, -0.052, -0.134, 0.116, 0.195, 0.00, 0.11, 0]
-      ]
+    const topY = SK.y + HL;
+    /* Where a strand actually meets the head, at its own x. Anchoring every
+       strand at the centre-line depth pushed the outer ones off the front of
+       the skull, and the fringe stood up off the crown as a ring of planks
+       instead of lying on it. */
+    const anchor = (xu, yl) => {
+      const rr = r(yl), q = Math.max(0.0004, rr * rr - xu * xu);
+      return Math.sqrt(q) * SK.sz;
     };
-    for (const [x, dy, z, w, h, rz, rx, lit] of (styles[cfg.hairStyle] || styles.swept)) {
-      const c = taper(w * U, w * 0.34 * U, h * U, w * 0.60 * U,
-        lit ? hairB : hairA, x * U, topY + dy * U, frontZ * 1.00 + z * U);
-      c.rotation.z = rz;
-      c.rotation.x = rx;
-      j.head.add(c);
+    /* The fringe is a MASS with tips cut into it, not a row of strands.
+
+       Seven separate slabs hanging off the hairline read as seven separate
+       slabs — you can count them, and the gaps between them show forehead.
+       One shell that follows the skull from the hairline down over the brow,
+       with a few tapers breaking its lower edge, is what stylised hair
+       actually looks like, and it is fewer parts. */
+    const FR_LO = HL - 0.018 * U;                     // just above the brow
+    const shellPts = [];
+    for (let yl = HL + 0.012 * U; yl >= FR_LO; yl -= 0.010 * U)
+      shellPts.push([r(Math.max(yl, 0.004 * U)) + T * 1.25, SK.y + yl]);
+    const shell = lathe(shellPts, hairA, {
+      squash: sq, seg: Math.round(Sculpt.seg * 1.2),
+      phiStart: -1.02, phiLength: 2.04, roll: T * 1.2
+    });
+    shell.material = twoSided(hairA);
+    j.head.add(shell);
+
+    /* Tips. Short tapers hanging from the shell's lower edge, anchored at
+       their root so they hang instead of standing half above it. */
+    /* Three broad locks, not a row of teeth. Wide enough to overlap each
+       other and short enough to stop above the brow — five narrow tapers
+       hanging to eye level read as a comb clipped to the forehead. */
+    const tips = {
+      swept: [[-0.058, 0.052, 0.026, -0.30, 0], [-0.008, 0.062, 0.032, -0.06, 1],
+              [0.052, 0.050, 0.022, 0.28, 0]],
+      crop: [[-0.050, 0.048, 0.014, -0.24, 0], [0.004, 0.056, 0.018, 0.02, 1],
+             [0.052, 0.046, 0.013, 0.26, 0]],
+      long: [[-0.060, 0.054, 0.030, -0.30, 0], [-0.006, 0.064, 0.036, -0.05, 1],
+             [0.056, 0.052, 0.026, 0.28, 0]]
+    };
+    for (const [x, w, h, rz, lit] of (tips[cfg.hairStyle] || tips.swept)) {
+      const root = new THREE.Group();
+      root.position.set(x * U, SK.y + FR_LO + 0.012 * U, anchor(x * U, FR_LO) + T * 1.15);
+      root.rotation.z = rz;
+      root.rotation.x = -0.06;
+      root.add(taper(w * U, w * 0.62 * U, h * U, 0.024 * U,
+        lit ? hairB : hairA, 0, -h * U * 0.5, 0));
+      j.head.add(root);
+    }
+
+    /* The long style keeps hair down the back and past the shoulders — that
+       is the whole silhouette difference, and a shell cannot do it. */
+    if (cfg.hairStyle === 'long') {
+      for (const [x, rz, h] of [[-0.092, -0.22, 0.19], [0.092, 0.22, 0.19], [0, 0, 0.185]]) {
+        const root = new THREE.Group();
+        const back = x === 0;
+        root.position.set(x * U, SK.y + (back ? -0.010 : 0.020) * U,
+          back ? -(r(0.0) + T) * SK.sz * 0.86 : -0.030 * U);
+        root.rotation.z = rz;
+        root.rotation.x = 0.14;
+        root.add(taper(back ? 0.112 * U : 0.046 * U, back ? 0.070 * U : 0.024 * U,
+          h * U, 0.034 * U, hairA, 0, -h * U * 0.5, 0));
+        j.head.add(root);
+      }
     }
 
     /* Sideburns hug the side of the head and stop at the jaw. v4 hung them a
        full half-width out at 3cm thick and they read as tusks. */
     for (const side of [-1, 1]) {
-      const sb = taper(0.018 * U, 0.009 * U, 0.058 * U, 0.012 * U,
-        hairA, side * (r(0.010 * U) * 0.97), SK.y + 0.020 * U, -0.004 * U);
-      sb.rotation.x = 0.04;
-      sb.rotation.z = side * 0.05;
-      j.head.add(sb);
+      const root = new THREE.Group();
+      root.position.set(side * (r(0.030 * U) * 0.94), SK.y + 0.040 * U, -0.004 * U);
+      root.rotation.z = side * 0.05;
+      const sb = taper(0.017 * U, 0.009 * U, 0.052 * U, 0.011 * U, hairA, 0, -0.026 * U, 0);
+      root.add(sb);
+      j.head.add(root);
     }
   }
 
@@ -1042,74 +1215,71 @@ const Sculpt = {
   }
 
   /* --- hands ------------------------------------------------------------
-     Four fingers and a thumb, with a curl joint. The previous version was one
-     block with two grooves cut into it, which at any distance under three
-     metres read as a four-prong fork rather than a hand. Fingers cost twelve
-     triangles each at this bevel and they merge into the palm's material, so
-     the whole hand is still one draw submission. */
+     Four fingers and a thumb. They merge into the palm's material, so the
+     whole hand is still one draw submission, and the punch animation curls
+     the finger group as a unit. */
   function buildHand(rig, arm, side, m, S) {
-    const hw = 0.076 * S, hh = 0.112 * S, hd = 0.100 * S;
-    arm.hand.add(soft(hw * 2, hh, hd, m.dark, 0, -0.050 * S, 0.004 * S, 0.46));
-    arm.hand.add(chip(hw * 1.9, 0.022 * S, hd * 0.9, m.armor, 0, -0.008 * S, 0.012 * S, 0.4));
-    // Knuckle bar.
-    arm.hand.add(chip(hw * 1.8, 0.020 * S, 0.030 * S, m.armor, 0, -0.098 * S, 0.040 * S, 0.3));
+    /* A chunky glove.
+
+       The old hand was a palm, a back plate, a knuckle bar, four fingers of
+       two segments each, a thumb of two, and a trim chip — fifteen pieces on
+       something eight centimetres across. It read as clutter from anywhere
+       further than arm's length, which is everywhere. This is a palm, one
+       finger mass with three grooves cut by the gaps between four short
+       stubs, and a thumb. Same read, a third of the parts. */
+    const hw = 0.078 * S, hh = 0.118 * S, hd = 0.104 * S;
+    arm.hand.add(soft(hw * 2, hh, hd, m.dark, 0, -0.052 * S, 0.004 * S, 0.52));
+    // One band across the back of the hand.
+    arm.hand.add(chip(hw * 1.8, 0.020 * S, 0.026 * S, m.armor, 0, -0.014 * S, 0.040 * S, 0.45));
 
     const fingers = new THREE.Group();
-    fingers.position.set(0, -0.100 * S, 0.006 * S);
-    /* Two segments each, short and thick. The first version ran 0.052-0.060
-       per segment, which on a 1.8 m body is a 10 cm finger — the hand came
-       out as a set of claws. Real fingers are shorter than they feel, and a
-       stylised hand wants them shorter still. */
-    const len = [0.030, 0.035, 0.033, 0.027];
+    fingers.position.set(0, -0.104 * S, 0.006 * S);
+    const len = [0.036, 0.042, 0.040, 0.032];
     for (let i = 0; i < 4; i++) {
       const fx = (-0.0345 + i * 0.023) * S;
-      const seg1 = chip(0.022 * S, len[i] * S, 0.028 * S, m.dark, fx, -len[i] * 0.5 * S, 0.004 * S, 0.44);
-      const knuckle = new THREE.Group();
-      knuckle.position.set(0, -len[i] * S, 0.002 * S);
-      const seg2 = chip(0.020 * S, len[i] * 0.78 * S, 0.026 * S, m.dark, fx, -len[i] * 0.39 * S, 0.007 * S, 0.44);
-      knuckle.add(seg2);
-      // A resting hand is never flat. A third of a curl at the second joint
-      // is what stops it reading as a rake.
-      knuckle.rotation.x = -0.42;
-      fingers.add(seg1, knuckle);
+      // One segment each, heavily bevelled so the tip is round. The second
+      // knuckle is a curl on the group, not another box.
+      const f = chip(0.0205 * S, len[i] * S, 0.030 * S, m.dark, fx, -len[i] * 0.5 * S, 0.004 * S, 0.60);
+      f.rotation.x = -0.22;
+      fingers.add(f);
     }
     arm.hand.add(fingers);
     arm.fingers = fingers;
 
     const thumb = new THREE.Group();
-    thumb.position.set(side * 0.060 * S, -0.048 * S, 0.026 * S);
+    thumb.position.set(side * 0.062 * S, -0.050 * S, 0.028 * S);
     thumb.rotation.z = side * 0.95;
-    thumb.rotation.x = -0.42;
-    thumb.add(chip(0.026 * S, 0.048 * S, 0.028 * S, m.dark, 0, -0.024 * S, 0, 0.45));
-    const tip = chip(0.023 * S, 0.038 * S, 0.026 * S, m.dark, 0, -0.019 * S, 0.004 * S, 0.45);
-    const tg = new THREE.Group();
-    tg.position.y = -0.048 * S;
-    tg.rotation.x = -0.35;
-    tg.add(tip);
-    thumb.add(tg);
+    thumb.rotation.x = -0.46;
+    thumb.add(chip(0.026 * S, 0.062 * S, 0.028 * S, m.dark, 0, -0.031 * S, 0, 0.58));
     arm.hand.add(thumb);
     arm.thumb = thumb;
-    arm.hand.add(chip(0.075 * S, 0.011 * S, 0.016 * S, m.trim, 0, -0.086 * S, 0.048 * S, 0.3));
   }
 
   /* --- boots ------------------------------------------------------------ */
+  /* --- boots ------------------------------------------------------------
+     One chunky form, and that is the whole boot.
+
+     The old one was seven pieces: a cuff, a foot, a sole, four tread bars, a
+     toe cap, a tongue and two lace bars. At the distance the camera actually
+     sits none of them read as what they are — they read as white flecks and
+     hard lines stuck to a dark blob. A Fortnite boot is one silhouette with
+     one sole and one trim line, and it holds up from any distance. */
   function buildBoot(ft, m, S) {
+    // Ankle into the boot shaft, rolled at the top so the leg enters cleanly.
     ft.add(lathe([
-      [0.052 * S, 0.10 * S], [0.086 * S, 0.055 * S], [0.090 * S, -0.02 * S], [0.074 * S, -0.075 * S]
-    ], m.dark, { squash: 0.94 }));
-    ft.add(soft(0.115 * S, 0.078 * S, 0.24 * S, m.dark, 0, -0.075 * S, 0.055 * S, 0.44));
-    ft.add(soft(0.126 * S, 0.030 * S, 0.275 * S, m.armor, 0, -0.108 * S, 0.058 * S, 0.35));
-    // Tread: four bars under the sole. Only ever seen mid-jump, and exactly
-    // then it is the thing the camera is pointed at.
-    for (let i = 0; i < 4; i++)
-      ft.add(chip(0.118 * S, 0.012 * S, 0.030 * S, m.dark, 0, -0.122 * S, (-0.03 + i * 0.055) * S, 0.2));
-    ft.add(taper(0.105 * S, 0.082 * S, 0.062 * S, 0.09 * S, m.armor, 0, -0.062 * S, 0.165 * S));
-    // Tongue and two lace bars.
-    ft.add(chip(0.070 * S, 0.075 * S, 0.030 * S, m.cloth || m.dark, 0, -0.030 * S, 0.112 * S, 0.35));
-    for (let i = 0; i < 2; i++)
-      ft.add(chip(0.082 * S, 0.010 * S, 0.014 * S, m.trim, 0, (-0.012 - i * 0.030) * S, 0.122 * S, 0.3));
-    ft.add(chip(0.080 * S, 0.010 * S, 0.016 * S, m.trim, 0, -0.030 * S, 0.126 * S, 0.3));
+      [0.050 * S, 0.115 * S],
+      [0.082 * S, 0.062 * S],
+      [0.094 * S, -0.010 * S],
+      [0.090 * S, -0.070 * S]
+    ], m.dark, { squash: 0.94, roll: 0.014 * S }));
+    // The foot: one soft box, wider at the toe, with a real bevel.
+    ft.add(soft(0.122 * S, 0.090 * S, 0.255 * S, m.dark, 0, -0.072 * S, 0.058 * S, 0.5));
+    // Sole: a single slab, proud of the boot all the way round.
+    ft.add(soft(0.134 * S, 0.034 * S, 0.282 * S, m.armor, 0, -0.112 * S, 0.058 * S, 0.42));
+    // One trim line across the instep. One.
+    ft.add(chip(0.100 * S, 0.013 * S, 0.020 * S, m.trim, 0, -0.038 * S, 0.140 * S, 0.4));
   }
+
 
   /* ======================================================================
      INSTALL
@@ -1127,8 +1297,11 @@ const Sculpt = {
       rig.faceHair = rig.faceHair || new THREE.MeshStandardMaterial({
         color: opts.hairDark || '#3d2113', roughness: 0.62, metalness: 0.04
       });
+      /* The highlight tone is a HIGHLIGHT. At #6b3a1c against a #3d2113 base
+         the lit strands read as separate pale cards laid on the forehead
+         rather than as light catching the top of the hair. */
       rig.faceHairLit = rig.faceHairLit || new THREE.MeshStandardMaterial({
-        color: opts.hairLit || '#6b3a1c', roughness: 0.6, metalness: 0.05
+        color: opts.hairLit || '#4c2a17', roughness: 0.6, metalness: 0.05
       });
       rig.faceMask = rig.faceMask || new THREE.MeshStandardMaterial({
         color: opts.maskColor || '#aab6c6', roughness: 0.6, metalness: 0.12

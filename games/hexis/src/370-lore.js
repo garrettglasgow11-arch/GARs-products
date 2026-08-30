@@ -626,7 +626,8 @@ html.blackout #dmgvig{ opacity:.55 !important; background:radial-gradient(circle
               color: T.hairCol, roughness: 0.80, metalness: 0
             });
             rig.faceHairLit = new THREE.MeshStandardMaterial({
-              color: new THREE.Color(T.hairCol).multiplyScalar(1.45),
+              // A highlight, not a second hair colour.
+              color: new THREE.Color(T.hairCol).multiplyScalar(1.28),
               roughness: 0.78, metalness: 0
             });
           }

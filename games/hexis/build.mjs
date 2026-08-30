@@ -50,7 +50,7 @@ if (openAt >= 0) {
 }
 
 // Keep the build stamp on the title screen honest. Bump this, not the HTML.
-const VERSION = '3.2 · Stormbreak';
+const VERSION = '3.3 · Stormbreak';
 html = html
   .replace(/Hexis \d+\.\d+(\.\d+)? · (The Storm Trilogy|Stormbreak)/g, 'Hexis ' + VERSION)
   .replace(/<div class="build">[^<]*<\/div>/, '<div class="build">Hexis ' + VERSION + '</div>');

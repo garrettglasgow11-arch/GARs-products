@@ -1,4 +1,4 @@
-# HEXIS 3.2 — "Stormbreak"
+# HEXIS 3.3 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -331,6 +331,97 @@ from the chest and a light one jitters.
 * Pauldrons ran to 1.95x the arm radius, which put their outer edge nearly
   twice the torso's own half-width out on each side. They are caps that sit on
   the shoulder now, not wings off it.
+
+---
+
+## 3.3 — smooth
+
+The brief was "clean, not sloppy, smooth like Fortnite". Three things were
+making the characters look folded rather than sculpted, and all three were
+mechanical rather than a matter of taste.
+
+### Profiles were chains of straight lines
+
+A lathe profile written as seven `[radius, height]` pairs revolves into a
+surface with a **crease at every one of those pairs**, because the segments
+between them are straight. On a chest that is six hard rings stacked up the
+torso, and the eye reads it as panelling.
+
+`smoothProfile()` now runs every profile through a centripetal Catmull-Rom
+spline before it is revolved, so each corner becomes a curve and
+`computeVertexNormals` has something continuous to average. Centripetal, not
+uniform: a uniform spline overshoots at a sharp corner, which on a shoulder
+puts the bulge outside the silhouette the profile asked for and at an apex
+swings the radius negative and pinches.
+
+Segment counts went up with it — 16 sides on a body shell, 20 on a face, 8
+rings on a joint ball. Ten was chosen for a camera across a street; this
+game's camera sits two metres behind the player's shoulder, and at that range
+you can count sides.
+
+### Every full lathe had an unwelded seam
+
+A 360° lathe duplicates its first column of vertices at the end so the UVs can
+run 0..1. `computeVertexNormals` treats the two columns as different vertices,
+each averaging only the faces on its own side, and the disagreement draws a
+hard crease down the surface. On a head that crease lands **straight down the
+middle of the face**. One pass averaging the normals across both columns
+removes it everywhere.
+
+### Every open rim was a cut edge
+
+A lathe is an open tube: where the profile stops, the surface stops, and you
+see a raw polygon ring edge-on — a hard bright line that reads as torn card.
+`rollEnds()` curls the profile inward at each end into a rolled hem, which is
+what a real garment or a real plate does anyway. Sleeves, cuffs, pauldrons,
+belts, gauntlets, kneepads and the collar all roll now.
+
+### Fewer parts
+
+Smoothing exposed how much of the model was clutter, so the count came down:
+
+* **The upper arm** was a suit form, a sleeve stopping mid-bicep and a
+  pauldron cap, each with its own open rim — three nested tongues hanging off
+  the shoulder. The sleeve now covers the whole upper arm and the pauldron
+  rolls under into it.
+* **The hand** was fifteen pieces on something eight centimetres across. It is
+  a palm, four bevelled stubs and a thumb.
+* **The boot** was a cuff, a foot, a sole, four tread bars, a toe cap, a
+  tongue and two lace bars. It is a shaft, a foot, a sole and one trim line.
+* **The collarbone bars, the pocket tabs and the three forearm dots** are
+  gone. At two metres they read as dirt on the lens.
+* **The jacket front** was two lapel plates and a separate collar ring, each
+  stopping with a cut end — and the two lapel tops sat under the chin as a
+  pair of dark boxes. It is a strip up each side of the opening plus a collar
+  that overlaps their tops.
+
+### The face was placed against the wrong surface
+
+Every feature was positioned at the head's **centre-line** depth regardless of
+how far off-centre it sat. A head is a surface of revolution: at the eye's x
+offset the skull has already fallen away, so an eye at centre-line depth
+bulges out as a white golf ball, while the nose and mouth — which really are
+on the centre — end up buried inside and vanish. Both were happening at once,
+which is why the face read as an egg with two eyes stuck on it.
+
+`szAt(y, x)` solves the cross-section properly. With that fixed, the eye got a
+socket, an iris and a pupil, and the mouth and nose came back.
+
+### `taper()` builds its box centred
+
+Which is why hair never worked. A strand anchored at the hairline put **half
+of itself above the hairline**, and rotating it just swung both halves — hence
+four versions of horns, then a ring of planks standing off the crown. Strands
+hang from a root group now, and the fringe itself is one shell following the
+skull with three broad locks cut into its lower edge, rather than seven
+separate slabs you could count.
+
+### Cost
+
+Roughly four times the triangles on a character, and about 10% *fewer* draw
+calls, because there are fewer parts to merge. `Sculpt.lowSpec` puts phones
+and anyone on the low quality setting back on the old budget — smoothing off,
+9 sides — since the smoothing is the expensive half.
 
 ---
 

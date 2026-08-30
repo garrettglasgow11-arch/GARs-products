@@ -579,7 +579,10 @@ const Tex = {
       const fp = this.rig && this.rig.faceParts;
       if (!fp || fp.__tex) return;
       fp.__tex = true;
-      Tex.dress(fp.skin, 'skin', 1.6, 0.55);
+/* Skin at 1.6 repeats tiles about six times across a head, which at
+         conversation range reads as speckle rather than skin. Under 1 the
+         pores go big enough to be pores. */
+      Tex.dress(fp.skin, 'skin', 0.7, 0.22);
       Tex.dress(fp.hairDark, 'fabric', 3.2, 1.3);
       Tex.dress(fp.hairLit, 'fabric', 3.2, 1.3);
     }, 'tex31:face');
