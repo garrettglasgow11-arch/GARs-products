@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#12100d">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="Free browser games by GAR Productions.">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2312100d'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle'%3E%F0%9F%8E%AE%3C/text%3E%3C/svg%3E">
+<title>GAR Productions — Games</title>
+<style>
+  :root{--soil:#12100d;--panel:#1e1a14;--line:#3a3125;--amber:#e8a33d;--text:#e8ddc8;--dim:#9c8e75;--faint:#6b6051}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--soil);color:var(--text);font-family:'Trebuchet MS',ui-rounded,system-ui,sans-serif;
+       min-height:100vh;padding:38px 18px 48px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:620px;margin:0 auto}
+  h1{font-size:clamp(26px,7vw,40px);letter-spacing:1px}
+  .sub{color:var(--faint);font-size:13px;letter-spacing:3px;text-transform:uppercase;margin-top:6px}
+  h2{font-size:12px;letter-spacing:2.5px;text-transform:uppercase;color:var(--faint);margin:34px 2px 10px}
+  a.game{
+    display:flex;align-items:center;gap:14px;text-decoration:none;color:inherit;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:15px;margin-bottom:11px;transition:border-color .18s,transform .1s;
+  }
+  a.game:hover{border-color:var(--amber)}
+  a.game:active{transform:scale(.99)}
+  a.game.soon{opacity:.55}
+  .ico{width:52px;height:52px;flex:0 0 52px;display:grid;place-items:center;font-size:27px;overflow:hidden;
+       background:#272119;border:1px solid var(--line);border-radius:13px}
+  .nm{font-size:17px;font-weight:bold;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .tag{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--soil);
+       background:var(--amber);border-radius:5px;padding:2px 7px;font-weight:bold}
+  .tag.off{background:#3a3125;color:var(--dim)}
+  .ds{font-size:13px;color:var(--dim);margin-top:4px;line-height:1.5}
+  code{background:#272119;border:1px solid var(--line);border-radius:4px;padding:1px 4px;font-size:12px}
+  footer{margin-top:38px;font-size:11.5px;color:var(--faint);line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GAR Productions</h1>
+  <p class="sub">Free browser games</p>
+
+  <h2>Desktop</h2>
+  <div class="game">
+    <div class="ico"><svg viewBox="0 0 11 15" width="30" height="41" shape-rendering="crispEdges" aria-hidden="true"><g fill="#96602e"><rect x="4" y="3" width="3" height="1"/><rect x="3" y="4" width="5" height="1"/><rect x="4" y="5" width="3" height="1"/><rect x="5" y="6" width="1" height="1"/><rect x="4" y="7" width="3" height="1"/><rect x="4" y="8" width="3" height="1"/><rect x="4" y="9" width="3" height="1"/><rect x="3" y="10" width="5" height="1"/><rect x="2" y="11" width="7" height="3"/><rect x="3" y="14" width="5" height="1"/></g><g fill="#6a4526"><rect x="2" y="0" width="1" height="1"/><rect x="8" y="0" width="1" height="1"/><rect x="3" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="2" y="7" width="2" height="1"/><rect x="7" y="7" width="2" height="1"/><rect x="0" y="8" width="2" height="1"/><rect x="9" y="8" width="2" height="1"/><rect x="2" y="9" width="2" height="1"/><rect x="7" y="9" width="2" height="1"/></g></svg></div>
+    <div>
+      <div class="nm">Pocket Colony <span class="tag">Download</span></div>
+      <div class="ds">A fan-made ant colony sim as a native pixel-art game.
+      Walk your ant across the surface and down into the nest, forage, fight bugs and dig out chambers.
+      In-game guide, bestiary, fan art gallery and settings; no network access of any kind.<br>
+      Download the build for your platform and run it &mdash; nothing to install.
+      Windows, macOS and Linux, plus an Android APK you can build yourself.</div>
+    </div>
+  </div>
+
+  <h2>Browser</h2>
+  <a class="game soon" href="./cosmicon/">
+    <div class="ico">🔮</div>
+    <div>
+      <div class="nm">Cosmicon <span class="tag off">Later</span></div>
+      <div class="ds">Void Collector — an RPG prototype, on ice for now.</div>
+    </div>
+  </a>
+
+  <footer>
+    Everything here is free, ad-free, with no accounts and no tracking.<br>
+    Fan projects are unofficial and unaffiliated with any commercial game or publisher.
+  </footer>
+</div>
+</body>
+</html>

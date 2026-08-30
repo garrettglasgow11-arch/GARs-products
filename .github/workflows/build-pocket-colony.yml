@@ -1,0 +1,204 @@
+# Builds standalone Pocket Colony binaries for Windows, macOS and Linux.
+#
+# A PyInstaller binary only runs on the OS and CPU it was built on, so each
+# platform is built on its own runner.  Push a tag like `pc-v0.3.0` to get a
+# GitHub Release with all three attached, or run the workflow by hand from the
+# Actions tab to just download the artifacts.
+name: Build Pocket Colony
+
+on:
+  push:
+    tags: ['pc-v*']
+    # Building on the working branch too, so an APK can be pulled from the
+    # Actions tab without publishing anything.
+    branches: ['claude/**']
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: games/pocket-colony
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 links against an older glibc, so the Linux build also runs
+          # on distributions a few years old rather than only the newest.
+          - os: ubuntu-22.04
+            artifact: PocketColony-linux-x86_64
+            package: tar
+          - os: windows-latest
+            artifact: PocketColony-windows-x86_64
+            package: zip
+          - os: macos-latest
+            artifact: PocketColony-macos-arm64
+            package: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip pyinstaller pygame-ce
+
+      - name: Build the macOS icon
+        if: runner.os == 'macOS'
+        run: iconutil -c icns packaging/icon.iconset -o packaging/icon.icns
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean PocketColony.spec
+
+      - name: Smoke test the binary
+        if: runner.os == 'Linux'
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        # Exit 124 means the timer stopped a healthy game loop; anything else
+        # means it fell over on startup.
+        run: |
+          set +e
+          timeout 12 ./dist/PocketColony
+          code=$?
+          echo "exit code $code"
+          test $code -eq 124
+
+      - name: Stage the release files
+        shell: bash
+        run: |
+          mkdir -p out
+          cp RUN-ME.txt README.md out/
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp -R dist/PocketColony.app out/
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            cp dist/PocketColony.exe out/
+          else
+            cp dist/PocketColony out/
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          cd out
+          if [ "${{ matrix.package }}" = "tar" ]; then
+            tar -czf ../${{ matrix.artifact }}.tar.gz .
+          else
+            7z a ../${{ matrix.artifact }}.zip . || zip -r ../${{ matrix.artifact }}.zip .
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: games/pocket-colony/${{ matrix.artifact }}.*
+
+  android:
+    # The APK is built here rather than on a developer machine because the
+    # Android SDK, NDK and a JDK are a multi-gigabyte install.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write        # to force-push the apk-drop branch
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip openjdk-17-jdk autoconf libtool pkg-config \
+            zlib1g-dev libncurses-dev libffi-dev libssl-dev cmake
+
+      - name: Install buildozer
+        run: python -m pip install --upgrade pip buildozer 'cython<3' virtualenv
+
+      # The SDK, NDK and the compiled Python are worth caching: a cold build
+      # takes the better part of an hour, a warm one a few minutes.
+      - name: Cache the Android toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            games/pocket-colony/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('games/pocket-colony/buildozer.spec') }}
+          restore-keys: buildozer-${{ runner.os }}-
+
+      - name: Build the APK
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # On failure buildozer prints a 120-line environment dump and tells you
+      # the real error is "hidden in the log above" - which pushes it out of
+      # reach of anything that reads the tail. Pull it back out.
+      - name: Show what actually failed
+        if: failure()
+        run: |
+          echo '===================== error lines ====================='
+          grep -nE 'error:|fatal error:|ERROR:|Exception|Traceback' \
+            "$RUNNER_TEMP/build.log" | tail -40 || echo '(nothing matched)'
+          echo
+          echo '============ tail, environment dump stripped ============'
+          grep -vE '^[^#]*#[[:space:]]+[A-Z0-9_]+ = ' "$RUNNER_TEMP/build.log" | tail -60
+
+      - name: Name the APK
+        shell: bash
+        run: |
+          mkdir -p out
+          cp bin/*.apk out/PocketColony-0.3.0-android.apk
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketColony-android
+          path: games/pocket-colony/out/*.apk
+
+      # Artifact downloads are served from a storage host some networks block,
+      # and an artifact arrives as a zip that has to be unpacked before an APK
+      # can be installed.  Dropping the APK on its own orphan branch makes it
+      # fetchable over plain git and directly downloadable as a single file.
+      # The branch holds no history and can be deleted at any time.
+      - name: Drop the APK on a fetchable branch
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/drop"
+          cp out/PocketColony-0.3.0-android.apk "$RUNNER_TEMP/drop/"
+          cd "$RUNNER_TEMP/drop"
+          cat > README.md <<'EOT'
+          # APK drop
+
+          Disposable branch. Holds one debug APK built by
+          `.github/workflows/build-pocket-colony.yml`, force-pushed on every
+          successful Android build. No history, nothing depends on it, safe to
+          delete.
+          EOT
+          git init -q
+          git checkout -q -b apk-drop
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -q -m "APK from ${GITHUB_SHA}"
+          git push -q --force \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+            apk-drop
+
+  release:
+    needs: [desktop, android]
+    if: startsWith(github.ref, 'refs/tags/pc-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

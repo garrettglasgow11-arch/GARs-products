@@ -1,0 +1,58 @@
+POCKET COLONY
+A fan-made ant colony sim.  Python + pygame.  Portrait, pixel art.
+
+------------------------------------------------------------------
+QUICK START
+------------------------------------------------------------------
+
+1. Install Python 3.9 or newer from python.org (tick "Add to PATH"
+   on Windows).
+
+2. Open a terminal in this folder and run:
+
+       pip install pygame-ce
+       python main.py
+
+   On macOS / Linux you may need python3 and pip3 instead.
+
+------------------------------------------------------------------
+CONTROLS
+------------------------------------------------------------------
+
+   Move ............ WASD or arrow keys, or drag the on-screen stick
+   Bite ............ SPACE or J, or the BITE button
+   Use / enter ..... E or RETURN, or tap the prompt
+   Menu ............ ESC, or the gear icon
+   Beta menu ....... F3
+   Fullscreen ...... F11
+
+------------------------------------------------------------------
+WHAT TO DO
+------------------------------------------------------------------
+
+You start underground.  Walk to the shaft with the arrow and use it
+to go up.  Topside, walk over food to pick it up, then walk back
+into the nest to bank it.  Use chambers by standing in them.
+
+Keep MEAT above zero or the queen stops laying.  Bank often - a full
+bag left topside is one death away from being half a bag.
+
+There is a full guide in the game: gear icon -> HOW TO PLAY.
+
+------------------------------------------------------------------
+ANDROID
+------------------------------------------------------------------
+
+       pip install buildozer
+       buildozer -v android debug
+
+The APK lands in bin/.  buildozer.spec is already configured.
+
+------------------------------------------------------------------
+
+No ads, no accounts, no network access of any kind.  Your save and
+settings are two files in your own user data folder and nothing is
+sent anywhere.  Full terms and privacy policy are in the game menu.
+
+Unofficial fan project.  All code and art original.  Not affiliated
+with any commercial game or its publisher.
