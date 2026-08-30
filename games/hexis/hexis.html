@@ -898,7 +898,7 @@ html[data-mode="panel"] #title{display:none !important}
     <div class="tbolt tbolt3"></div>
     <div class="vig"></div>
     <div class="savechip hide" id="savechip">Save · <b>—</b></div>
-    <div class="build">Hexis 3.3 · Stormbreak</div>
+    <div class="build">Hexis 3.4 · Stormbreak</div>
     <div class="plate">
     <h1>HEX<span>I</span>S</h1>
     <div class="sub" id="titlesub">Act I — The Awakening</div>
@@ -18753,7 +18753,7 @@ const Shell = {
     for (const id in relabel) { const b = document.getElementById(id); if (b) b.textContent = relabel[id]; }
     if (sub) sub.textContent = 'The grid is failing and the rain is carrying a charge. Nobody has told you what you are yet.';
     const build = title.querySelector('.build');
-    if (build) build.textContent = 'Hexis 3.3 · Stormbreak';
+    if (build) build.textContent = 'Hexis 3.4 · Stormbreak';
     if (keys) keys.innerHTML =
       '<b>WASD</b> move <b>SPACE</b> jump, twice to double <b>SHIFT</b> run<br>' +
       '<b>LMB</b> sword <b>Q</b> hold to charge the fist <b>E</b> talk <b>TAB</b> skills<br>' +
@@ -21985,7 +21985,7 @@ html.cleanhud #ui > *:not(#pausepanel):not(#fade):not(#card){ opacity:0 !importa
   panel.className = 'hide';
   panel.innerHTML =
     '<div class="side">' +
-    '<h2>Paused</h2><div class="lbl">Hexis 3.3 · Stormbreak</div>' +
+    '<h2>Paused</h2><div class="lbl">Hexis 3.4 · Stormbreak</div>' +
     '<button data-a="resume">Resume</button>' +
     '<button data-a="log" class="on">Job log</button>' +
     '<button data-a="codex">Codex</button>' +
@@ -23648,23 +23648,40 @@ const Sculpt = {
        at a given height. v4 placed every feature at the head's EQUATOR radius
        regardless of height, so the eyes and mouth floated in front of the
        face on a flat plane and shimmered against it. */
+    /* The skull carries its own cheekbone and jaw.
+
+       Both used to be lenses added on top, and an added mass on a curved
+       surface always shows a rim where it lands, however shallow you make it
+       — the cheeks read as two pale ovals stuck to the face at every setting
+       tried. A head really is widest all the way round at the cheekbone and
+       really does narrow to a jaw below it, so a surface of revolution can
+       carry both, and then there is no rim to hide. */
     const SKULL = [
       [0.0001, -0.128 * S * H],
-      [0.058 * S * H, -0.112 * S * H],
-      [0.092 * S * H, -0.058 * S * H],
-      [0.106 * S * H, 0.0],
-      [0.110 * S * H, 0.050 * S * H],
-      [0.101 * S * H, 0.098 * S * H],
-      [0.072 * S * H, 0.138 * S * H],
+      [0.046 * S * H, -0.116 * S * H],   // chin
+      [0.074 * S * H, -0.092 * S * H],   // jaw
+      [0.090 * S * H, -0.060 * S * H],   // jaw angle
+      [0.098 * S * H, -0.020 * S * H],
+      [0.106 * S * H, 0.016 * S * H],    // cheekbone, at the eye line
+      [0.112 * S * H, 0.034 * S * H],    // brow ridge
+      [0.107 * S * H, 0.052 * S * H],    // set back above the brow
+      [0.110 * S * H, 0.074 * S * H],    // widest, the parietal
+      [0.100 * S * H, 0.112 * S * H],
+      [0.072 * S * H, 0.140 * S * H],
       [0.0001, 0.156 * S * H]
     ];
     const skull = lathe(SKULL, face ? (rig.faceSkin || m.dark) : m.dark, { squash: 0.96 });
     const SKY = 0.150 * S;
     skull.position.y = SKY;
-    skull.scale.z = 1.07;
+    /* A head is markedly longer front-to-back than it is wide — about a
+       quarter again. 1.07 was barely an oval. And it sits BEHIND the neck
+       axis: the spine enters the skull well forward of the back of the
+       cranium, so a head centred on its own neck has no occiput. */
+    skull.scale.z = 1.16;
+    skull.position.z = -0.010 * S;
     j.head.add(skull);
     rig.skull = skull;
-    rig.__skull = { p: SKULL, y: SKY, sx: 1, sz: 1.07 * 0.96 };
+    rig.__skull = { p: SKULL, y: SKY, z: -0.010 * S, sx: 1, sz: 1.16 * 0.96 };
 
     if (face) buildFace(rig, j, m, S, H, cfg);
     else buildHelmet(rig, j, m, S, H, cfg);
@@ -23931,70 +23948,88 @@ const Sculpt = {
        nose and mouth — which really are on the centre — end up buried inside
        and vanish. Both were happening at once, which is why the face read as
        an egg with two eyes stuck on it. */
+    const SZ0 = SK.z || 0;                 // the skull's own z offset
+    /* Place a mass by where its FRONT lands, not by a fraction of the surface
+       depth. A fraction only works while every feature sits on the same part
+       of the skull; once the landmarks moved down onto the narrower lower
+       face, the same fractions left the cheeks, jaw and brow bulging off the
+       head like barnacles. `proud` is how far the mass clears the skin, in
+       head units, and it is the only number worth tuning. */
+    const onFace = (mesh, y, x, halfDepth, proud) => {
+      mesh.position.set(x, y, szAt(y, x) - halfDepth + proud);
+      return mesh;
+    };
     const szAt = (y, x) => {
       const r = surf(y);
       const q = Math.max(0, r * r - (x || 0) * (x || 0));
-      return Math.sqrt(q) * SK.sz;
+      return Math.sqrt(q) * SK.sz + SZ0;
     };
     const sz = (y) => szAt(y, 0);
 
     const U = S * H;                       // one head unit
-    const browY = SK.y + 0.062 * U;
-    const eyeY = SK.y + 0.030 * U;
-    const noseY = SK.y - 0.004 * U;
-    const mouthY = SK.y - 0.062 * U;
-    const chinY = SK.y - 0.104 * U;
+
+    /* ------------------------------------------------------------------
+       LANDMARKS, from the standard head canon rather than from taste.
+
+       Three things were off, and they are the three everybody gets wrong:
+
+       1. The eyes sat too high. They belong at the vertical midpoint of the
+          WHOLE head — cranium included — not of the face. This skull runs
+          -0.128 to +0.156, so the midline is +0.014. They were at +0.030,
+          which is the classic error: it shrinks the forehead and makes the
+          skull look like it has been sawn off.
+       2. The face thirds were 0.024 / 0.066 / 0.124. Hairline-to-brow,
+          brow-to-nose-base and nose-base-to-chin should be roughly EQUAL.
+          The lower face was nearly twice its share, so the character read
+          long-jawed no matter what the jaw geometry did.
+       3. The ears floated. An ear spans exactly brow to nose base — that is
+          what makes a head look assembled rather than decorated.
+
+       These land at about 0.056 / 0.078 / 0.080, which is the canon with a
+       slightly shorter forehead, because a bigger cranium is the stylised
+       read this game wants.
+       ------------------------------------------------------------------ */
+    const browY = SK.y + 0.030 * U;
+    const eyeY = SK.y + 0.016 * U;         // the head's own midline
+    const noseY = SK.y - 0.048 * U;        // ear bottom lines up here
+    const mouthY = SK.y - 0.078 * U;       // a third of the way nose to chin
+    const chinY = SK.y - 0.112 * U;
 
     /* Chin and jaw are MASS added to the lower skull, sharing its centre, so
        they blend instead of sitting on it. A taper laid across the jaw — what
        v4 did — flattens the whole lower face into a slab, because taper()
        scales its own bevel away along X. */
     const FS = Sculpt.faceSeg;
-    const chin = ball(0.050 * U, skin, 0, 1, FS);
-    chin.scale.set(0.96, 0.74, 0.92);
-    chin.position.set(0, chinY + 0.014 * U, sz(chinY) * 0.26);
-    j.head.add(chin);
+    const chin = ball(0.046 * U, skin, 0, 1, FS);
+    chin.scale.set(1.00, 0.80, 0.52);
+    j.head.add(onFace(chin, chinY + 0.012 * U, 0, 0.0239 * U, 0.002 * U));
 
     for (const side of [-1, 1]) {
       /* These are MASS, not features: each one has to sit far enough inside
          the skull that only a swell of it clears the surface. v6 pushed them
          out to 0.6 of the local half-width and every one read as a separate
          pebble glued to the face. */
-      const jw = ball(0.056 * U, skin, 0, 1, FS);
-      jw.scale.set(0.66, 0.80, 0.94);
-      const jwX = sx(mouthY) * 0.44;
-      jw.position.set(side * jwX, mouthY - 0.012 * U, szAt(mouthY, jwX) * 0.10);
-      j.head.add(jw);
-
-      const ck = ball(0.042 * U, skin, 0, 1, FS);
-      ck.scale.set(0.94, 0.66, 0.72);
-      const ckX = sx(eyeY) * 0.44;
-      ck.position.set(side * ckX, eyeY - 0.034 * U, szAt(eyeY, ckX) * 0.58);
-      j.head.add(ck);
-
-      // Brow ridge: a swell over the eye, not a bar in front of it.
-      const br = ball(0.048 * U, skin, 0, 1, FS);
-      br.scale.set(0.98, 0.40, 0.60);
-      const brX = sx(browY) * 0.34;
-      br.position.set(side * brX, browY - 0.004 * U, szAt(browY, brX) * 0.62);
-      j.head.add(br);
+      /* Cheek, jaw and brow are all in the skull profile now. A supraorbital
+         ridge does run right around the skull, so a surface of revolution can
+         carry it, and the ridge that shades the eye no longer costs two pale
+         ovals hanging over the eyebrows. Nothing is added here at all. */
     }
 
     // Nose: a bridge running down off the brow, then a tip.
-    const bridge = ball(0.022 * U, skin, 0, 1, FS);
-    bridge.scale.set(0.54, 2.15, 0.92);
-    bridge.position.set(0, (browY + noseY) / 2, sz((browY + noseY) / 2) * 0.86);
-    j.head.add(bridge);
+    const bridge = ball(0.019 * U, skin, 0, 1, FS);
+    bridge.scale.set(0.62, 1.55, 0.60);
+    j.head.add(onFace(bridge, (browY + noseY) / 2 - 0.008 * U, 0, 0.0114 * U, 0.005 * U));
     const tip = ball(0.016 * U, skin, 0, 1, FS);
-    tip.scale.set(1.20, 0.90, 1.05);
-    tip.position.set(0, noseY - 0.010 * U, sz(noseY) * 0.97);
-    j.head.add(tip);
+    tip.scale.set(1.34, 0.92, 1.05);
+    j.head.add(onFace(tip, noseY - 0.008 * U, 0, 0.0168 * U, 0.015 * U));
 
     for (const side of [-1, 1]) {
-      const ear = ball(0.032 * U, skin, 0, 1, FS);
-      ear.scale.set(0.32, 1.18, 0.82);
-      ear.position.set(side * sx(eyeY) * 0.92, eyeY - 0.014 * U, -0.012 * U);
-      ear.rotation.z = side * -0.10;
+      /* Span brow to nose base — 0.078 of a head unit here — and sit on the
+         widest part of the skull, a little behind its midline. */
+      const ear = ball(0.030 * U, skin, 0, 1, FS);
+      ear.scale.set(0.30, 1.30, 0.80);
+      ear.position.set(side * sx(eyeY) * 0.94, SK.y - 0.009 * U, SZ0 - 0.016 * U);
+      ear.rotation.z = side * -0.08;
       j.head.add(ear);
     }
 
@@ -24004,8 +24039,11 @@ const Sculpt = {
     const iris = rig.eyeIris || (rig.eyeIris = new THREE.MeshBasicMaterial({
       color: cfg.eye || cfg.trim || '#5FE3FF', fog: false
     }));
+    /* An eye is a fifth of the head's width and the gap between the two is
+       one more eye. That single ratio does more for a face than any amount
+       of shaping. */
     const eyeR = 0.0225 * U;
-    const eyeX = sx(eyeY) * 0.455;
+    const eyeX = sx(eyeY) * 0.410;
     /* Set the ball into a socket, measured where the socket actually is. At
        this x the skull has already curved away by about a tenth of its
        radius, so using the centre-line depth pushed the whole eyeball out
@@ -24018,13 +24056,13 @@ const Sculpt = {
       /* A socket first. Without something darker behind it the white sits on
          the skin as a pale blob and the whole eye disappears into the face —
          which is exactly what v3.2 shipped: two featureless ovals. */
-      const sock = ball(eyeR * 1.22, dark, 0, 1, FS);
-      sock.scale.set(1.16, 0.88, 0.40);
+      const sock = ball(eyeR * 1.10, dark, 0, 1, FS);
+      sock.scale.set(1.04, 0.82, 0.34);
       sock.position.set(side * eyeX, eyeY, eyeZ - eyeR * 0.10);
       j.head.add(sock);
 
       const e = ball(eyeR, white, 0, 1, FS);
-      e.scale.set(1.10, 0.86, 0.62);
+      e.scale.set(1.00, 0.88, 0.62);
       e.position.set(side * eyeX, eyeY, eyeZ);
       j.head.add(e);
 
@@ -24066,14 +24104,13 @@ const Sculpt = {
     }));
     /* One mouth mass with a line through it. Three stacked lips read as
        three stacked lips — you could count them from two metres. */
-    const mz = sz(mouthY) * 0.94;
     const lips = ball(0.026 * U, lipMat, 0, 1, FS);
-    lips.scale.set(1.85, 0.60, 0.50);
-    lips.position.set(0, mouthY, mz);
-    j.head.add(lips);
+    lips.scale.set(1.30, 0.62, 0.50);
+    j.head.add(onFace(lips, mouthY, 0, 0.013 * U, 0.002 * U));
+    const mz = lips.position.z;
     const line = ball(0.022 * U, rig.faceMouth || m.dark, 0, 1, FS);
-    line.scale.set(1.90, 0.12, 0.44);
-    line.position.set(0, mouthY, mz + 0.008 * U);
+    line.scale.set(1.34, 0.12, 0.44);
+    line.position.set(0, mouthY, mz + 0.007 * U);
     j.head.add(line);
 
     if (cfg.mask) {
@@ -24100,6 +24137,7 @@ const Sculpt = {
     const SK = rig.__skull, U = S * H, T = 0.012 * U;
     const p = SK.p;
     const sq = SK.sz / SK.sx;
+    const SZ0 = SK.z || 0;                 // the skull's own z offset
     // Skull half-width at a skull-local height.
     const r = (yl) => {
       for (let i = 1; i < p.length; i++)
@@ -24119,7 +24157,7 @@ const Sculpt = {
     for (let yl = HL; yl <= 0.140 * U; yl += 0.022 * U) cap.push([r(yl) + T, SK.y + yl]);
     cap.push([r(0.150 * U) * 0.55 + T, SK.y + 0.150 * U]);
     cap.push([0.0001, SK.y + 0.156 * U + T]);
-    j.head.add(lathe(cap, hairA, { squash: sq }));
+    j.head.add(lathe(cap, hairA, { squash: sq, pos: [0, 0, SZ0] }));
 
     /* The back and sides carry on down past the hairline — hair does not stop
        level all the way round. A partial lathe centred on -Z, so the face
@@ -24128,7 +24166,7 @@ const Sculpt = {
     for (let yl = -0.052 * U; yl <= HL + 0.004 * U; yl += 0.024 * U)
       back.push([r(yl) + T, SK.y + yl]);
     const bk = lathe(back, hairA, {
-      squash: sq, phiStart: Math.PI - 1.30, phiLength: 2.60
+      squash: sq, pos: [0, 0, SZ0], phiStart: Math.PI - 1.30, phiLength: 2.60
     });
     bk.material = twoSided(hairA);
     j.head.add(bk);
@@ -24144,7 +24182,7 @@ const Sculpt = {
        instead of lying on it. */
     const anchor = (xu, yl) => {
       const rr = r(yl), q = Math.max(0.0004, rr * rr - xu * xu);
-      return Math.sqrt(q) * SK.sz;
+      return Math.sqrt(q) * SK.sz + SZ0;
     };
     /* The fringe is a MASS with tips cut into it, not a row of strands.
 
@@ -24158,7 +24196,7 @@ const Sculpt = {
     for (let yl = HL + 0.012 * U; yl >= FR_LO; yl -= 0.010 * U)
       shellPts.push([r(Math.max(yl, 0.004 * U)) + T * 1.25, SK.y + yl]);
     const shell = lathe(shellPts, hairA, {
-      squash: sq, seg: Math.round(Sculpt.seg * 1.2),
+      squash: sq, seg: Math.round(Sculpt.seg * 1.2), pos: [0, 0, SZ0],
       phiStart: -1.02, phiLength: 2.04, roll: T * 1.2
     });
     shell.material = twoSided(hairA);
@@ -24194,7 +24232,7 @@ const Sculpt = {
         const root = new THREE.Group();
         const back = x === 0;
         root.position.set(x * U, SK.y + (back ? -0.010 : 0.020) * U,
-          back ? -(r(0.0) + T) * SK.sz * 0.86 : -0.030 * U);
+          SZ0 + (back ? -(r(0.0) + T) * SK.sz * 0.86 : -0.030 * U));
         root.rotation.z = rz;
         root.rotation.x = 0.14;
         root.add(taper(back ? 0.112 * U : 0.046 * U, back ? 0.070 * U : 0.024 * U,
@@ -24207,7 +24245,7 @@ const Sculpt = {
        full half-width out at 3cm thick and they read as tusks. */
     for (const side of [-1, 1]) {
       const root = new THREE.Group();
-      root.position.set(side * (r(0.030 * U) * 0.94), SK.y + 0.040 * U, -0.004 * U);
+      root.position.set(side * (r(0.030 * U) * 0.94), SK.y + 0.040 * U, SZ0 - 0.004 * U);
       root.rotation.z = side * 0.05;
       const sb = taper(0.017 * U, 0.009 * U, 0.052 * U, 0.011 * U, hairA, 0, -0.026 * U, 0);
       root.add(sb);
@@ -24222,12 +24260,13 @@ const Sculpt = {
      older, larger skull and floated above it. */
   function buildHelmet(rig, j, m, S, H, cfg) {
     const SK = rig.__skull, U = S * H, p = SK.p, T = 0.014 * U;
+    const SZ0 = SK.z || 0;
     const at = (i, k) => [p[i][0] * (k || 1) + T, SK.y + p[i][1]];
     j.head.add(lathe([
       [p[1][0] * 0.72 + T, SK.y + p[1][1] - 0.010 * U],
       at(2), at(3), at(4), at(5), at(6),
       [0.0001, SK.y + p[7][1] + T]
-    ], m.armor, { squash: SK.sz / SK.sx }));
+    ], m.armor, { squash: SK.sz / SK.sx, pos: [0, 0, SZ0] }));
 
     const browY = SK.y + 0.052 * U, jawY = SK.y - 0.070 * U;
     const rz = (y) => {
@@ -24235,9 +24274,9 @@ const Sculpt = {
       for (let i = 1; i < p.length; i++)
         if (yl <= p[i][1]) {
           const t = (yl - p[i - 1][1]) / (p[i][1] - p[i - 1][1] || 1);
-          return (p[i - 1][0] + (p[i][0] - p[i - 1][0]) * t) * SK.sz;
+          return (p[i - 1][0] + (p[i][0] - p[i - 1][0]) * t) * SK.sz + SZ0;
         }
-      return 0;
+      return SZ0;
     };
     // Visor: a recessed dark band with a lit strip standing proud inside it.
     j.head.add(chip(0.126 * U, 0.062 * U, 0.040 * U, m.dark,

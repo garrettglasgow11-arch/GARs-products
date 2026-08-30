@@ -1,4 +1,4 @@
-# HEXIS 3.3 — "Stormbreak"
+# HEXIS 3.4 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -422,6 +422,56 @@ Roughly four times the triangles on a character, and about 10% *fewer* draw
 calls, because there are fewer parts to merge. `Sculpt.lowSpec` puts phones
 and anyone on the low quality setting back on the old budget — smoothing off,
 9 sides — since the smoothing is the expensive half.
+
+---
+
+## 3.4 — head proportions off a reference
+
+Worked from a photo reference, used **only** to measure generic anatomical
+landmark ratios. No likeness, no scan, no texture, nothing derived from the
+image is in this repository, and no character is based on anyone.
+
+Three of the standard landmark relationships were wrong, and they are the
+three everyone gets wrong:
+
+**The eyes were too high.** They belong at the vertical midpoint of the
+*whole* head, cranium included — not of the face. This skull runs -0.128 to
++0.156 in head units, so the midline is +0.014. They were at +0.030. That
+error shrinks the forehead and makes the skull look sawn off at the top.
+
+**The face thirds were 0.024 / 0.066 / 0.124.** Hairline-to-brow,
+brow-to-nose-base and nose-base-to-chin should be roughly equal. The lower
+face was nearly twice its share, so the character read long-jawed no matter
+what the jaw geometry did. They land at 0.056 / 0.078 / 0.080 now — the canon
+with a slightly shorter forehead, because a bigger cranium is the stylised
+read this game wants.
+
+**The ears floated.** An ear spans exactly brow to nose base. That one
+relationship is most of what makes a head look assembled rather than
+decorated.
+
+Also from the canon: an eye is a fifth of the head's width and the gap
+between the two is one more eye; the mouth's corners land under the inner
+edge of the irises; the nose is about one eye wide. And a head is a quarter
+again longer front-to-back than it is wide — the skull was at 1.07, barely an
+oval — and it sits behind the neck axis, because a head centred on its own
+neck has no occiput.
+
+### Added masses never worked, so they are gone
+
+The cheeks, jaw and brow were spheres laid on the skull. A mass wide enough
+to be a cheek spans a large arc, and the skull falls away across that arc far
+faster than the sphere does — so even with its centre flush, both edges stand
+off the head. Flattening them into lenses only moved the rim; there is always
+a rim where an added mass lands on a curved surface, and the cheeks read as
+two pale ovals stuck to the face at every setting tried.
+
+A head really is widest all the way round at the cheekbone, really does narrow
+to a jaw below it, and really does carry a supraorbital ridge right around the
+skull. All three are in the **skull's own profile** now, so there is no rim to
+hide, and the face is one continuous surface with three fewer parts per side.
+
+What is still added: eyes, brows, nose, mouth, ears, hair. That is all.
 
 ---
 
