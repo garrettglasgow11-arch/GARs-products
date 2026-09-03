@@ -84,8 +84,20 @@ const Sculpt = {
      and so does anyone who has turned quality down — the smoothing is the
      most expensive thing in the sculptor and it is the first thing to go. */
   get lowSpec() {
-    const o = window.HEXIS && window.HEXIS.opt;
-    return !!Input.touch || (o && o.quality === 'low');
+    const g = window.HEXIS;
+    /* `opt`, not `opts`, was the bug: the settings object is `g.opts`, so
+       this expression was `undefined && ...` and the low-quality geometry
+       path never once fired. Nobody who turned quality down got the cheaper
+       characters they asked for.
+
+       `_q` is in here too. Quality defaults to 'auto', so on a machine the
+       scaler has already dropped to two-thirds resolution, 'low' is never
+       set and the old test would still have missed it. */
+    if (Sculpt.forceHi) return false;
+    if (Input.touch) return true;
+    if (!g) return false;
+    if (g.opts && g.opts.quality === 'low') return true;
+    return typeof g._q === 'number' && g._q < 0.8;
   },
   get seg() { return this.lowSpec ? 9 : 16; },
   /* Joint balls get half the rings of a full sphere. They are only ever seen
@@ -98,7 +110,13 @@ const Sculpt = {
      get: the smoothing is what turns six control points into a continuous
      curve, and it is the single most expensive thing in the sculptor. */
   get smoothing() { return this.lowSpec ? 1 : 2.4; },
-  coatFar: 28 * 28
+  coatFar: 28 * 28,
+  /* Force the full geometry budget whatever the device says. Set by ?hipoly,
+     and needed for anything that photographs the models: a software renderer
+     drops _q below 0.8 within seconds, so every screenshot taken on one was
+     silently of the cheap build. */
+  forceHi: (typeof FLAGS !== 'undefined' && FLAGS.hipoly) ||
+           (typeof location !== 'undefined' && /[?&]hipoly/.test(location.search))
 };
 
 (function modelPass() {

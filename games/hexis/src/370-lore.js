@@ -617,6 +617,7 @@ html.blackout #dmgvig{ opacity:.55 !important; background:radial-gradient(circle
           rig.cfg.mask = !!T.mask;
           rig.cfg.helmet = false;
           rig.cfg.kind = null;          // people, not troops: no enemy gear
+          rig.cfg.team = true;          // issued kit, not street clothes
           rig.__tier = 0;
           if (T.skin) rig.faceSkin = new THREE.MeshStandardMaterial({
             color: T.skin, roughness: 0.74, metalness: 0

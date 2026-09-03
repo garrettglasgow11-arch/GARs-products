@@ -45,6 +45,14 @@ const Tex = {
     c.width = c.height = size || this.size;
     return c;
   },
+  /* Every generator reads its own canvas back — the mean-normalise pass, the
+     height-to-normal pass and the noise composite all call getImageData. The
+     browser warns about exactly this: without the hint it keeps the canvas on
+     the GPU and stalls on each readback. Twenty-seven maps times three reads
+     is a measurable chunk of load time. */
+  ctx2d(c) {
+    return c.getContext('2d', { willReadFrequently: true });
+  },
 
   /* Value noise on a canvas, tileable by construction: the lattice wraps, so
      the right edge is the left edge and there is no visible repeat seam. */
@@ -91,7 +99,7 @@ const Tex = {
     if (this.cache.has(key)) return this.cache.get(key);
     const size = opts.size || this.size;
     const c = this.canvas(size);
-    const x = c.getContext('2d');
+    const x = Tex.ctx2d(c);
     draw(x, size);
     /* Normalise the mean.
 
@@ -140,14 +148,18 @@ const Tex = {
      more predictable than authoring a normal map by hand, and it means every
      surface's bump automatically matches its own albedo. */
   normalFrom(tex, strength = 1.4, key) {
-    const k = (key || tex.userData.key) + ':n';
+    /* Strength belongs in the key. Without it the first caller's bump depth
+       wins for every later caller of the same map — a jacket asking for 1.15
+       and a wall asking for 1.1 silently shared one normal map, and which
+       one you got depended on load order. */
+    const k = (key || tex.userData.key) + ':n' + strength.toFixed(2);
     if (this.cache.has(k)) return this.cache.get(k);
     const src = tex.userData.canvas;
     const size = src.width;
-    const sctx = src.getContext('2d');
+    const sctx = this.ctx2d(src);
     const sd = sctx.getImageData(0, 0, size, size).data;
     const c = this.canvas(size);
-    const x = c.getContext('2d');
+    const x = Tex.ctx2d(c);
     const img = x.createImageData(size, size);
     const at = (i, j) => sd[(((j + size) % size) * size + ((i + size) % size)) * 4] / 255;
     for (let j = 0; j < size; j++) {
@@ -199,7 +211,7 @@ const Tex = {
         else x.fillRect(Math.random() * s, Math.random() * s, 2, len);
       }
       x.globalAlpha = 0.35;
-      const n = this.canvas(s), nx = n.getContext('2d');
+      const n = this.canvas(s), nx = Tex.ctx2d(n);
       this.noiseInto(nx, s, 16, 3);
       x.drawImage(n, 0, 0);
       x.globalAlpha = 1;
@@ -223,7 +235,7 @@ const Tex = {
         x.fillRect(Math.random() * s, Math.random() * s, 1, 1);
       }
       x.globalAlpha = 0.28;
-      const n = this.canvas(s), nx = n.getContext('2d');
+      const n = this.canvas(s), nx = Tex.ctx2d(n);
       this.noiseInto(nx, s, 8, 3);
       x.drawImage(n, 0, 0);
       x.globalAlpha = 1;
@@ -286,7 +298,7 @@ const Tex = {
   skin() {
     return this.make('skin', (x, s) => {
       x.fillStyle = '#9a9a9a'; x.fillRect(0, 0, s, s);
-      const n = this.canvas(s), nx = n.getContext('2d');
+      const n = this.canvas(s), nx = Tex.ctx2d(n);
       this.noiseInto(nx, s, 4, 2);
       x.globalAlpha = 0.22; x.drawImage(n, 0, 0); x.globalAlpha = 1;
       for (let i = 0; i < 2600; i++) {
@@ -302,7 +314,7 @@ const Tex = {
   concrete() {
     return this.make('concrete', (x, s) => {
       x.fillStyle = '#8f8f8f'; x.fillRect(0, 0, s, s);
-      const n = this.canvas(s), nx = n.getContext('2d');
+      const n = this.canvas(s), nx = Tex.ctx2d(n);
       this.noiseInto(nx, s, 6, 4);
       x.globalAlpha = 0.5; x.drawImage(n, 0, 0); x.globalAlpha = 1;
       for (let i = 0; i < 900; i++) {
@@ -331,7 +343,7 @@ const Tex = {
   rust() {
     return this.make('rust', (x, s) => {
       x.fillStyle = '#7d7d7d'; x.fillRect(0, 0, s, s);
-      const n = this.canvas(s), nx = n.getContext('2d');
+      const n = this.canvas(s), nx = Tex.ctx2d(n);
       this.noiseInto(nx, s, 5, 4);
       x.globalAlpha = 0.65; x.drawImage(n, 0, 0); x.globalAlpha = 1;
       for (let i = 0; i < 150; i++) {
@@ -424,10 +436,10 @@ const Tex = {
     return t;
   },
   normalVariant(kind, scale, strength) {
-    const key = kind + '@' + scale + ':n';
+    const key = kind + '@' + scale + ':n' + (strength || 1).toFixed(2);
     if (this.cache.has(key)) return this.cache.get(key);
     const base = this[kind] ? this[kind]() : this.fabric();
-    const src = this.normalFrom(base, strength);
+    const src = this.normalFrom(base, strength || 1);
     const t = src.clone();
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.repeat.set(scale, scale);

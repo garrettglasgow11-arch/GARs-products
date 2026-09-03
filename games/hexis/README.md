@@ -1,4 +1,4 @@
-# HEXIS 3.4 — "Stormbreak"
+# HEXIS 3.5 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -475,6 +475,62 @@ What is still added: eyes, brows, nose, mouth, ears, hair. That is all.
 
 ---
 
+## 3.5 — the rest of the surfaces, and a batch of fixes
+
+### 345 shipped nine maps and spent one of them
+
+Every solid in every zone sampled `concrete`, whatever it was. A brick wall, a
+tunnel floor, a foundry catwalk and the Spire's lobby were the same grey noise
+at the same scale, and the only thing telling them apart was vertex colour —
+which is where 2.4.6 started.
+
+`346-surfaces.js` adds **eighteen** more generators — brick, asphalt, gravel,
+tile, stucco, marble, tread, corrugate, grate, mesh, chipped, circuit, carbon,
+camo, knit, scale, wood, frost and cracked glass — and, more to the point,
+spends them:
+
+**A wall map and a floor map per zone.** The triplanar sample already does a
+dominant-axis test to decide which way a face points; this spends that decision
+twice. A horizontal face gets the floor texture and the wall above it gets the
+wall texture, for one extra sampler and one extra branch. The pairs are chosen
+so the two never share a frequency — gravel under tile reads as two materials,
+gravel under concrete reads as noise on noise.
+
+| zone | walls | floor |
+|---|---|---|
+| house | stucco | wood |
+| arena | concrete | asphalt |
+| city | brick | asphalt |
+| undercity | tile | gravel |
+| foundry | corrugate | tread |
+| spire | marble | marble |
+| lattice | circuit | circuit |
+
+**Character surfaces that mean something.** Surface is a readability channel
+like silhouette and colour: camouflage on the Response Team, carbon on heavy
+armour, scales on Kell, mesh on the Swarmer, knit on civilians. Three different
+threats before you read a health bar.
+
+**Props**, which had no surface at all — they were the last flat-shaded things
+in a scene where everything else had one.
+
+### Fixes
+
+| | |
+|---|---|
+| **`Sculpt.lowSpec` never fired** | It read `HEXIS.opt`. The settings object is `HEXIS.opts`, so the expression was `undefined && …` and anyone who turned quality down got the full-fat characters anyway. It also now reads `_q`, because quality defaults to `auto` and a machine the scaler has already dropped to two-thirds resolution never sets `low` at all. |
+| **Normal maps collided on strength** | `normalFrom` and `normalVariant` cached by name and scale but not by bump strength. A jacket asking for 1.15 and a wall asking for 1.1 shared one normal map, and which depth you got depended on load order. |
+| **A shader rebuild on every zone load** | The static material's program cache key read `Tex.__zone` at call time, so the key moved the moment the player travelled and three.js recompiled programs that had not changed. It captures the zone the material was built for now. |
+| **Canvas readback stalls at load** | Every generator reads its own canvas back three times — mean-normalise, height-to-normal, noise composite. Without `willReadFrequently` the browser keeps the canvas on the GPU and stalls on each read. Twenty-seven maps times three reads is measurable. |
+| **No way to force full geometry** | A software renderer drops `_q` below 0.8 within seconds, so with the `lowSpec` fix in place every screenshot taken on one was silently of the cheap build. `?hipoly` overrides it. |
+
+Driven through low quality, all five travel destinations, two jobs, the team
+spawn, the jacket, Blackout, the board, the pause panel, a save round-trip and
+a resize: **zero errors, zero warnings** beyond three the base game already
+emits.
+
+---
+
 ## Testing
 
 There is no test harness in the repo — the game is the test — but everything
@@ -502,7 +558,8 @@ games/hexis/
     320-jobs.js       mission framework + 9 jobs
     330-acts.js       Acts II/III, board, travel, the Architect, the ending
     340-qol.js        pause, log, codex, checkpoints, options
-    345-texture.js    procedural textures — nine maps, no downloaded bytes
+    345-texture.js    procedural textures — the base nine, no downloaded bytes
+    346-surfaces.js   eighteen more, plus per-zone walls and floors
     350-model.js      the character sculptor: revolved limbs, real faces
     355-silhouette.js per-archetype builds, gear and idle bias
     360-perf.js       allocation pass, body budget, the rig-merge fix
