@@ -1,4 +1,4 @@
-# HEXIS 3.6 — "Stormbreak"
+# HEXIS 3.7 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -576,6 +576,85 @@ That has been on screen at every size since 2.4.6. Fixed for everyone.
 
 ---
 
+## 3.7 — the main menu, and where the frame actually goes
+
+### The menu had the game showing through it
+
+`.screen` is `position:absolute; inset:0` — every full-screen panel in the
+game is laid out by that one rule. Then line 143 of the 2.4.6 source says
+
+```css
+#title{ position:relative; overflow:hidden }
+```
+
+An id beats a class, so the title alone lost its absolute positioning, and
+`inset:0` does nothing to a relative box. `#title` stopped being sized by the
+viewport and started being sized by its own content: **516 pixels tall on a
+720 pixel screen**. The bottom 28% of the main menu was the game world
+showing through underneath it, as a pale blue slab under the buttons, on
+every display taller than the text. It has been there since 2.4.6 and it is
+the first thing anyone sees.
+
+Also fixed: the Regulator chip, the vitals bar and the objective panel were
+all drawing on top of the title screen. The `data-mode` attribute already
+gates the touch buttons and the pause chip — these were the pieces 3.1 and
+3.6 added afterwards and never registered. And the title's rain, drift and
+lightning animations now stop when you are not looking at the menu.
+
+### The frame is not where I thought it was
+
+Instrumented in a real fight — ten live bodies, 395 draw calls, 145k
+triangles:
+
+| | |
+|---|---|
+| JS per frame | **8.0 ms** median |
+| …of which every skeletal update | **0.4 ms** |
+| `renderer.render()` calls per game frame | **8** |
+
+All of the AI, physics, animation and every hook this project has added comes
+to eight milliseconds — and the character rigs, the thing four versions of
+model work went into, are half a millisecond of that. **The frame is spent
+submitting the scene eight times:** the scene, two bright-passes, four blur
+blits and a composite, plus a shadow map pass inside the first one.
+
+### The game already knew how to be cheap — it just asked too late
+
+2.4.2 ships a one-octave bloom path that skips three of those passes, and a
+shadow throttle that only rebuilds the map once the player has moved. Both
+are gated on `_q` — the **render scale** — so neither engages until the
+automatic scaler has already started shrinking the framebuffer.
+
+That is the wrong order. A tight bloom halo and a 20 Hz shadow map are
+things nobody can point to; a soft image is the first thing everybody sees.
+`385-perf.js` gives the existing renderer a dial that is not `_q`:
+
+| tier | bloom | shadows | passes |
+|---|---|---|---|
+| 3 | two octaves | up to 20 Hz | **8** |
+| 2 | one octave | up to 20 Hz | **5** |
+| 1 | one octave | up to 7 Hz | **5** |
+| 0 | none | off | **2** |
+
+Measured, not estimated: 8 → 5 → 2. An adaptive step walks it from measured
+frame time every 1.5 s, slow down and slower up, and only on `auto` — a
+player who picked a quality meant it. Phones start at tier 1. The base
+scaler still owns `_q` and still runs; it is simply no longer the first thing
+to move.
+
+**And one that was silently never installed:** 2.4.2's shadow throttle sits
+behind `if (!r.shadowMap.enabled) return`. Boot with shadows off, turn them
+on in the options, and the throttle never installs — `autoUpdate` stays true
+and the map rebuilds every frame for the rest of the session. It re-arms on
+an options change now.
+
+A note on method: the first version of this file patched `Post.prototype
+.render`. 2.4.2 wraps the post **instance**, so the prototype patch was
+shadowed and did nothing at all — and `renders/frame` stayed at 8 through
+every tier, which is how it got caught.
+
+---
+
 ## Testing
 
 There is no test harness in the repo — the game is the test — but everything
@@ -610,6 +689,8 @@ games/hexis/
     360-perf.js       allocation pass, body budget, the rig-merge fix
     370-lore.js       Part One: the Regulator, Blackout, the cast, the codex
     375-mobile.js     the phone HUD pass
+    380-menu.js       the main menu background bug, and HUD leaking onto it
+    385-perf.js       the effect tier: bloom octaves and shadow rate
   mobile.mjs          builds hexis-mobile.html (three.js inlined, PWA shell)
   hexis-mobile.html   the phone build — one file, no network
   vendor/three.min.js three.js r128, MIT, vendored for the mobile inline
