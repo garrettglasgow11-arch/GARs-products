@@ -26955,6 +26955,26 @@ html[data-mode="title"] #bars,
 html[data-mode="title"] #gui-comp,
 html[data-mode="title"] #fps{ display:none !important; }
 
+/* --- the compass tape ---------------------------------------------------
+   #gui-comp fades its ends with a mask-image and leaves overflow:visible.
+   A mask is not a clip: mask-repeat defaults to repeat, so the fade
+   gradient TILES past the element's own box, and a tick label positioned
+   beyond the tape still gets painted with a non-zero mask alpha.
+
+   The tape is 300px wide and its "SW" tick sits at x=797 — 221 pixels past
+   its own right edge, directly on top of the MENU button. It is invisible
+   today only because the compass sits at opacity 0 until a mission turns it
+   on, which is a stay of execution rather than a defence.
+
+   overflow:hidden clips the ticks to the tape, which is what the mask was
+   trying to express, and no-repeat stops the gradient tiling outward. The
+   mask already fades to nothing by 84%, so a hard edge at 100% never shows. */
+#gui-comp{
+  overflow:hidden;
+  -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat;
+  -webkit-mask-size:100% 100%; mask-size:100% 100%;
+}
+
 /* The build stamp sat on the join between the panel and the world, so it was
    half-legible against whichever happened to be behind it. Now that the
    panel reaches the floor it only needs to clear the safe area. */
