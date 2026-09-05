@@ -1,4 +1,4 @@
-# HEXIS 3.5 — "Stormbreak"
+# HEXIS 3.6 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -531,6 +531,51 @@ emits.
 
 ---
 
+## 3.6 — the phone build
+
+`hexis-mobile.html` is the same game as one self-contained file. Build it with
+`node mobile.mjs` after `node build.mjs`.
+
+**Self-contained matters.** `hexis.html` pulls three.js from a CDN, which on a
+phone is the difference between a game that works on the underground and one
+that shows a black screen. The mobile build inlines it — 1.76 MB, and a run
+with every non-local request blocked confirms **zero** external fetches.
+
+**What Android does to a browser game, and what stops it:**
+
+* Chrome reloads the page on a downward swipe — and swipe-down is a movement
+  input. `overscroll-behavior: none`.
+* The browser pans and zooms the canvas out from under the controls.
+  `touch-action: none`, plus a double-tap and pinch guard.
+* A game takes no key presses, so Android decides it is idle and turns the
+  screen off mid-fight. A wake lock, re-taken on every visibility change,
+  because the OS drops it.
+* A web app manifest, so **Add to Home Screen** gives a fullscreen landscape
+  launcher with an icon rather than a tab with an address bar.
+
+### The HUD had never been looked at on a phone-shaped screen
+
+Booted at 851×393 — an ordinary handset held sideways — it came back with
+eleven overlapping boxes:
+
+* SKILLS sat on top of MENU, and the frame counter sat on top of both;
+* the guard ring sat *inside* the touch button pad, so GUARD read through
+  HEAL and DASH;
+* the desktop ability row — with its LMB / SHIFT / Q / E key hints — was drawn
+  underneath the touch buttons that do the same four things;
+* the Regulator chip sat on the movement stick's ring, which is both a
+  readability problem and exactly where a thumb is about to be.
+
+`375-mobile.js` fixes those under `html.touchui`, adds a `shortui` pass for
+screens under 460px tall, and moves the guard ring to bottom centre where
+either thumb reaches it. Eleven overlaps down to none.
+
+**One of them was never a phone bug.** `#vitals.shell::before` prints
+INTEGRITY above the bar and the label row under it prints INTEGRITY again.
+That has been on screen at every size since 2.4.6. Fixed for everyone.
+
+---
+
 ## Testing
 
 There is no test harness in the repo — the game is the test — but everything
@@ -564,6 +609,10 @@ games/hexis/
     355-silhouette.js per-archetype builds, gear and idle bias
     360-perf.js       allocation pass, body budget, the rig-merge fix
     370-lore.js       Part One: the Regulator, Blackout, the cast, the codex
+    375-mobile.js     the phone HUD pass
+  mobile.mjs          builds hexis-mobile.html (three.js inlined, PWA shell)
+  hexis-mobile.html   the phone build — one file, no network
+  vendor/three.min.js three.js r128, MIT, vendored for the mobile inline
   stormlink/          the multiplayer build — see its own README
 ```
 
