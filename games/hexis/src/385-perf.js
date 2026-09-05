@@ -157,17 +157,32 @@
      up: a setting that oscillates is worse than either setting it swings
      between. Only on 'auto', because a player who picked a quality meant it. */
   step('adaptive', () => {
-    let acc = 0, n = 0, hold = 0;
-    Hook.after(Game.prototype, 'frame', function (_r, dt) {
+    /* Wall clock, not a dt argument. `frame()` takes none, so `function
+       (_r, dt)` binds undefined and `dt || 0.016` reports a flat 60 fps
+       whatever is actually happening — this loop ran for eighteen seconds at
+       twenty frames a second and never once decided anything was wrong. */
+    let last = performance.now(), acc = 0, hold = 0;
+    Hook.after(Game.prototype, 'frame', function () {
+      const now = performance.now();
+      acc += (now - last) / 1000; last = now;
       if (!this.opts || this.opts.quality !== 'auto') return;
-      if (this.state !== 'play') return;
-      acc += dt || 0.016; n++;
+      // Cutscenes are not 'play', and gating on 'play' froze the tier for the
+      // whole of the opening cut — the first thing a new player sees, running
+      // every effect at once.
+      if (this.state !== 'play' && this.state !== 'cutscene') return;
       if (acc < 1.5) return;                        // decide every 1.5 s
-      const avg = acc / n; acc = 0; n = 0;
+      acc = 0;
       if (hold > 0) { hold--; return; }
-      if (avg > 0.024 && this.__tier > 0) {         // under ~42 fps
+      /* 390 measures both. The interval says whether frames are being MISSED;
+         the work inside frame() says whether there is HEADROOM. Climbing on
+         the interval alone cannot work — under vsync it bottoms out, and a
+         50 Hz machine with 2 ms of work never reaches a 60 Hz gate. So work
+         decides the climb and the interval only vetoes it. */
+      const iv = g.__frameInterval === undefined ? 0.016 : g.__frameInterval;
+      const work = g.__frameWork === undefined ? 0 : g.__frameWork;
+      if (iv > 0.024 && this.__tier > 0) {          // missing frames
         this.setFrameTier(this.__tier - 1); hold = 3;
-      } else if (avg < 0.0135 && this.__tier < 3) { // over ~74 fps
+      } else if (work < 0.005 && iv < 1 / 40 && this.__tier < 3) {
         this.setFrameTier(this.__tier + 1); hold = 6;
       }
     }, 'frame37:adaptive');

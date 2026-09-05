@@ -1,4 +1,4 @@
-# HEXIS 3.7 — "Stormbreak"
+# HEXIS 3.8 — "Stormbreak"
 
 Two builds of the same game, in one folder.
 
@@ -655,6 +655,97 @@ every tier, which is how it got caught.
 
 ---
 
+## 3.8 — the adaptive systems were measuring a constant
+
+3.7 shipped an effect ladder and claimed it would keep the game smooth. It
+did not, and the reason is embarrassing enough to write down.
+
+### `frame()` takes no arguments
+
+Both adaptive loops were written as:
+
+```js
+Hook.after(Game.prototype, 'frame', function (_r, dt) {
+  acc += dt || 0.016;
+```
+
+`Game.prototype.frame()` has no parameters. The hook received `undefined`
+for `dt`, the `|| 0.016` fallback took over, and **both systems measured a
+hardcoded 16 ms forever**. A machine sitting at 20 fps was told, every single
+frame, that it was running at exactly 60. Neither ladder moved once in
+eighteen seconds of measurement — which is precisely what "still really
+laggy" looks like from the outside.
+
+### The built-in scaler counts frames, not seconds
+
+The same class of mistake, three years older:
+
+```js
+if (this._fc > 90) {                    // wait 90 frames to start
+  if (this._fps < 46) this._slow++;
+  else if (this._slow > 40 && ...)      // 40 slow frames to act
+    this._q -= 0.12;                    // one step of three
+}
+```
+
+At 60 fps: start after 1.5 s, react after 0.7. **At 5 fps: start after 18
+seconds, react after 8, and take 24 more to reach the floor.** The worse the
+framerate — the more the player needs help — the longer the game waits before
+giving any. `_q` sat at 1.0 through every measurement.
+
+The floor was 0.72 as well, which 2.4.2 raised on the reasoning that with the
+draw calls fixed nothing should need to go lower. True of the desktop it was
+measured on; not true of a phone.
+
+### And you cannot detect headroom from the frame interval
+
+The first fix decided on a clock — and then only ever went *down*. Thirty
+seconds at a viewport small enough to be trivial and it never recovered.
+
+`requestAnimationFrame` is vsync-locked. The interval between frames bottoms
+out around 16.7 ms no matter how much headroom there is, so a climb condition
+of "interval under 13.9 ms" **can never be true**. Raising it to vsync did not
+work either: measured at a trivial viewport, this machine ran a 20 ms interval
+with 2.4 ms of work — enormous headroom, but 50 fps, because the rasteriser
+cannot do 60. Plenty of real displays are 50 Hz and plenty of browsers
+throttle.
+
+So two numbers, answering different questions:
+
+| | |
+|---|---|
+| **interval** | wall time between frames — says whether frames are being **missed** |
+| **work** | time inside `frame()` — says how much budget is **spent** |
+
+Drop on the interval. Climb on the work, with the interval only vetoing while
+frames are actually being missed. `SLOW` (22.7 ms) and `OK` (20 ms) are
+deliberately different so there is a dead band, and a level that just failed
+becomes a ceiling for 30 seconds — without that the scaler walks straight back
+to the setting it could not sustain and the image visibly pulses, which the
+first working version did, bouncing 0.64 / 0.69 / 0.72 / 0.64.
+
+Measured end state on a machine that genuinely cannot cope: effects recover
+0 → 1 → 2 → 3 as headroom appears, resolution correctly **stays** down because
+frames are still being missed, and nothing hunts.
+
+### Cutscenes
+
+3.7's ladder returned early unless `state === 'play'`. A cutscene is not
+'play', so the tier froze at whatever it was when the cut began — on a fresh
+boot, tier 3, every effect on, eight passes. **The opening cutscene is the
+first thing a new player sees and it was the heaviest thing in the game.** It
+adapts now, and drops a tier on entry regardless, because a cutscene is on
+rails and nobody is going to lose a fight over a bloom octave.
+
+### Where the time actually goes
+
+A CDP profile of a real fight came back **99% `(program)`** — time outside JS,
+in the rasteriser. The game is fill bound, not CPU bound. That is why
+resolution and pass count are the levers that matter and why the JS-side
+micro-optimising in earlier versions moved nothing.
+
+---
+
 ## Testing
 
 There is no test harness in the repo — the game is the test — but everything
@@ -691,6 +782,7 @@ games/hexis/
     375-mobile.js     the phone HUD pass
     380-menu.js       the main menu background bug, and HUD leaking onto it
     385-perf.js       the effect tier: bloom octaves and shadow rate
+    390-scale.js      the resolution scaler: decide on a clock, climb on work
   mobile.mjs          builds hexis-mobile.html (three.js inlined, PWA shell)
   hexis-mobile.html   the phone build — one file, no network
   vendor/three.min.js three.js r128, MIT, vendored for the mobile inline
