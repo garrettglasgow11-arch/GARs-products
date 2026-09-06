@@ -56,6 +56,13 @@ twenty frames of a real Central City fight, not by guessing.
 | `450-menu.js` | the rotate banner has never laid out — a CSS rule styled a wrapper the markup never had, and a nowrap button crushed the text column anyway |
 | `460-cast.js` | the prologue cast was never retired unless you watched the prologue to the end |
 
+The merge keeps its index buffers. `RigOpt.mergeGeos` de-indexes everything it
+touches and the first cut of `400-skin.js` copied that, which is free for a
+static merge and is not free once the result is skinned: same 9,902 triangles
+on Hexis either way, 16,079 vertices submitted indexed against 23,806
+expanded. Triangles are what the rasteriser counts; vertices are what the
+vertex shader runs, and skinning is a vertex-shader cost.
+
 Measured by running the same script against both builds back to back — six
 hostiles in Central City plus a debris storm:
 
@@ -82,14 +89,56 @@ Every optimisation has a switch on the Dev menu's Frame page. If a character
 ever looks wrong, turn **Rig merge** off — the merge also reverts itself
 automatically if any code asks for a plate it folded away.
 
-### What is left
+### The one number that isn't here
 
-Of the 143, about 115 is still character rigs — the merged bodies plus the
-plates the merge refuses to touch: transparent materials, and anything the
-animation code holds by name. The protection walk errs generous on purpose;
-over-protecting costs draws, under-protecting stops a limb animating.
+Draw calls, vertices and triangles are hardware-independent and all three are
+measured above. GPU time is not: these were taken in a headless container with
+no GPU, where `renderer.render()` is software rasterisation and swings between
+3 ms and 18 ms across identical runs of the same build. So the trade the rig
+merge actually makes — 170 fewer draw calls against per-vertex skinning —
+cannot be settled here.
 
-Hexis himself is the worst of them, 37 leftovers against 6 merged, because a
-player character has far more named parts than a grunt does. That is the next
-thing worth doing, and it needs a careful look at which of those names are
-actually written to at runtime rather than a looser protection walk.
+It can be settled on your phone in about thirty seconds. Dev menu → Frame →
+turn the readout on, note the fps and draw count mid-fight, flip **Rig merge**,
+look again. The switch is remembered across reloads for exactly this reason.
+On mobile hardware the trade is not usually close: draw calls are the classic
+bottleneck and one-bone rigid skinning is what every character in every game
+already does. But it is hardware, and hardware is where it gets decided.
+
+### What is left, and why it is staying
+
+115 of the 143 is still character rigs. I attributed every leftover plate
+rather than guessing, and the answer is that the merge is close to its floor.
+
+```
+Hexis      6 merged + 37 left:  23 protected, 7 alone in their material,
+                                6 transparent, 1 unclassified
+grunt      5 merged +  5 left:   3 protected, 2 alone
+enforcer   5 merged + 11 left:   7 protected, 2 alone, 2 transparent
+```
+
+The protected ones are named on the rig, and the names are the reason:
+
+```
+rig.coat[n].g   6   panels that swing behind the body on velocity
+rig.blade       5   grows and pulses
+rig.eyes/lids/
+    brows       6   the face — lids blink, brows move
+rig.ventPack    4
+rig.hex/skull/
+    visor       3   toggled visible
+```
+
+Those are the parts that animate. Merging them is not a protection walk that
+is too cautious, it is the walk being right. Loosening it to reclaim the vent
+pack would risk the face and the coat for four draws a body.
+
+The genuinely reclaimable ones are the ~11 that are alone in their material —
+they could be folded into a single vertex-coloured mesh, worth about 10 draws
+across a whole fight, and only if you can prove none of those materials is one
+`setTrim` mutates. That is a 7% gain for a real chance of breaking the hit
+flash, so it is not done.
+
+The other floor is `5 merged` per body: that is the count of distinct
+materials a character has more than one mesh of. Going below it needs a
+texture atlas, which is an art-pipeline change, not a rendering one.

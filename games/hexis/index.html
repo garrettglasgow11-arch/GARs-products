@@ -27588,6 +27588,18 @@ const SkinMerge = {
 
   const M4 = THREE.Matrix4;
 
+  /* The one cost this change cannot be measured against in a headless
+     container is the one it trades against: fewer draw calls for per-vertex
+     skinning. On a phone GPU that trade is not close — draw calls are the
+     classic mobile bottleneck and rigid one-bone skinning is what every
+     character in every game already does. But it is hardware, and hardware
+     is where it has to be judged, so the switch on the Dev menu's Frame page
+     is remembered rather than resetting every reload. Turn it off, play,
+     turn it on, read the draw counter: that is the whole experiment. */
+  try {
+    if (localStorage.getItem('hexis.skin') === '0') SkinMerge.enabled = false;
+  } catch (e) { }
+
   /* ------------------------------------------------------------- MATERIAL
      A skinned copy that is a copy in name only. `clone()` gives us a
      material with the right maps and the right flags, and then every piece
@@ -27717,30 +27729,48 @@ const SkinMerge = {
     for (const [, list] of groups) {
       if (list.length < 2) continue;
       const chunks = [];
-      let verts = 0, hasUV = true;
+      let verts = 0, indices = 0, hasUV = true;
       for (const m of list) {
         const bi = boneIndex(m.parent);
         const src = m.geometry;
-        const geo = src.index ? src.toNonIndexed() : src.clone();
+        // Clone rather than toNonIndexed. The first cut of this de-indexed
+        // every plate, which is what RigOpt.mergeGeos does and what made it
+        // look like the house style — and it costs a box 36 vertices where
+        // the index buffer needs 24. Measured on Hexis: same 9,902 triangles
+        // either way, 16,079 vertices submitted indexed against 23,806
+        // expanded. Triangles are what the rasteriser counts; vertices are
+        // what the vertex shader runs, and skinning made that shader more
+        // expensive, not less.
+        const geo = src.clone();
         geo.applyMatrix4(m.matrixWorld);                // bake to world at bind
         const pa = geo.attributes.position, na = geo.attributes.normal, ua = geo.attributes.uv;
         if (!pa || !na) { geo.dispose(); continue; }
         if (!ua) hasUV = false;
-        chunks.push({ p: pa.array, n: na.array, u: ua ? ua.array : null, count: pa.count, bi });
+        const idx = geo.index ? geo.index.array : null;
+        chunks.push({
+          p: pa.array, n: na.array, u: ua ? ua.array : null,
+          count: pa.count, idx, icount: idx ? idx.length : pa.count, bi
+        });
         verts += pa.count;
+        indices += idx ? idx.length : pa.count;
         geo.dispose();
         victims.push(m);
       }
-      if (chunks.length < 2 || verts > 65535 * 4) continue;
+      if (chunks.length < 2 || verts > 1e6) continue;
 
       const P = new Float32Array(verts * 3), N = new Float32Array(verts * 3);
       const U = hasUV ? new Float32Array(verts * 2) : null;
       const I = new Uint16Array(verts * 4), W = new Float32Array(verts * 4);
-      let vo = 0;
+      const IDX = new (verts > 65535 ? Uint32Array : Uint16Array)(indices);
+      let vo = 0, io = 0;
       for (const c of chunks) {
         P.set(c.p, vo * 3); N.set(c.n, vo * 3);
         if (U && c.u) U.set(c.u, vo * 2);
         for (let i = 0; i < c.count; i++) { I[(vo + i) * 4] = c.bi; W[(vo + i) * 4] = 1; }
+        // Every plate's indices are rebased onto its slice of the buffer.
+        if (c.idx) for (let i = 0; i < c.icount; i++) IDX[io + i] = c.idx[i] + vo;
+        else for (let i = 0; i < c.icount; i++) IDX[io + i] = vo + i;
+        io += c.icount;
         vo += c.count;
       }
       const geo = new THREE.BufferGeometry();
@@ -27749,6 +27779,7 @@ const SkinMerge = {
       if (U) geo.setAttribute('uv', new THREE.BufferAttribute(U, 2));
       geo.setAttribute('skinIndex', new THREE.BufferAttribute(I, 4));
       geo.setAttribute('skinWeight', new THREE.BufferAttribute(W, 4));
+      geo.setIndex(new THREE.BufferAttribute(IDX, 1));
       geo.computeBoundingSphere();
 
       const src0 = list[0];
@@ -27896,6 +27927,7 @@ const SkinMerge = {
   step('control', () => {
     SkinMerge.setEnabled = function (on) {
       this.enabled = !!on;
+      try { localStorage.setItem('hexis.skin', on ? '1' : '0'); } catch (e) { }
       if (on) return;
       for (const rig of this.rigs.slice()) revert(rig, 'manual');
       this.queue.length = 0;
@@ -28456,8 +28488,10 @@ html[data-mode="title"] #devhud{ display:none !important; }
       sw('Wireframe', () => DEV.wire, (v) => { DEV.wire = v; wireframe(v); })
     ));
     b.appendChild(note('Rig merge is the 4.0 change: every character is folded ' +
-      'into one skinned mesh per material. Turn it off here to see what it is ' +
-      'worth on this device — the readout\'s draw count is the number to watch.'));
+      'into one skinned mesh per material. It trades draw calls for per-vertex ' +
+      'skinning, and only the device you are holding can settle that trade — so ' +
+      'the switch is remembered across reloads. Turn it off, fight something, ' +
+      'turn it on, and watch the frame counter and the draw count together.'));
 
     /* --- save ------------------------------------------------------------ */
     b.appendChild(el('h3', null, 'Save'));
