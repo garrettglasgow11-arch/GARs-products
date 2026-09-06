@@ -27964,12 +27964,16 @@ const SkinMerge = {
   step('shadow-diet', () => {
     const MIN = 0.55;                 // bounding radius, metres
     let t = 0, stamp = 0;
-    Bus.on('zone:loaded', () => { stamp++; g.__shadowDiet = { dropped: 0, kept: 0 }; });
+    // The stamp resets so a rebuilt zone's objects are examined again; the
+    // tally does not, because a per-zone count reads as zero on any zone
+    // whose props were all caught by the first pass after the load.
+    g.__shadowDiet = { dropped: 0, kept: 0 };
+    Bus.on('zone:loaded', () => { stamp++; });
     Hook.after(Game.prototype, 'frame', function () {
       t += this._dtAvg || 0.016;
       if (t < 2) return;
       t = 0;
-      const tally = g.__shadowDiet || (g.__shadowDiet = { dropped: 0, kept: 0 });
+      const tally = g.__shadowDiet;
       this.scene.traverse((o) => {
         if (!o.isMesh || o.__diet === stamp) return;
         o.__diet = stamp;
@@ -28423,6 +28427,9 @@ html[data-mode="title"] #devhud{ display:none !important; }
       (r.shadowDiet ? '  (' + r.shadowDiet.dropped + ' dropped)' : ''));
     row('Bodies merged', r.skin ? r.skin.bodies + '  ·  ' + r.skin.drawsNow + ' draws for all of them' : 'off');
     row('Plates folded, all run', r.skin ? r.skin.foldedTotal : '—');
+    row('Debris instances', r.swarm ? r.swarm.instances + ' in ' + r.swarm.draws + ' draws' +
+      (r.swarm.dropped ? '  (' + r.swarm.dropped + ' over budget)' : '') : '—');
+    row('Prologue rigs retired', r.castRetired === undefined ? '—' : r.castRetired);
     row('Merges undone by the net', r.skin ? r.skin.reverts : '—');
     row('Shader programs', r.programs === undefined ? '—' : r.programs);
     b.appendChild(kv);
@@ -28442,6 +28449,10 @@ html[data-mode="title"] #devhud{ display:none !important; }
       sw('Shadows', () => !!(g.renderer.shadowMap && g.renderer.shadowMap.enabled),
         (v) => { g.opts.shadows = v; g.renderer.shadowMap.enabled = v; g.renderer.shadowMap.needsUpdate = true; }),
       sw('Idle throttle', () => g.__idleRender !== false, (v) => { g.__idleRender = v; }),
+      // Off hides the debris rather than restoring the old mesh-per-chunk
+      // path — the proxies replaced those meshes for good at boot.
+      sw('Debris', () => (typeof Swarm !== 'undefined' && Swarm.enabled),
+        (v) => { if (typeof Swarm !== 'undefined') Swarm.setEnabled(v); }),
       sw('Wireframe', () => DEV.wire, (v) => { DEV.wire = v; wireframe(v); })
     ));
     b.appendChild(note('Rig merge is the 4.0 change: every character is folded ' +
@@ -28716,6 +28727,590 @@ html[data-mode="title"] #devhud{ display:none !important; }
 
   console.log('[hexis 4.0] file online: ' + done.join(', ') +
     (LS ? '  ·  progress saves locally' : '  ·  session-only'));
+})();
+
+/* ===== 440-fx.js ==========================================================
+   HEXIS 4.1 — the effects were the rest of it.
+
+   4.0 folded the character bodies and the frame went from 253 draw
+   submissions to 123 in the same fight. Here is where the 123 goes:
+
+       chunks (Debris)                    56
+       leftover rig plates                25
+       ghosts, rings, arcs, orbs          17
+       merged bodies                      11
+       everything else                    14
+
+   Debris is the single biggest thing left, and it is not a small pool:
+
+       decals   72 meshes, each with its own cloned material
+       chunks   90 meshes, each with its own cloned material
+       puffs    64 meshes, each with a new material
+
+   226 objects, 226 materials, and — because the pools are `grow: true` —
+   more than that once a fight gets busy. Every one is a separate draw with
+   a separate program lookup, and the spawn path sets `material.needsUpdate
+   = true` on each of them, which makes the renderer re-evaluate that
+   material's program the next time it is used. That is the cost of a piece
+   of gravel.
+
+   All 226 share three geometries and vary in exactly four things: where
+   they are, how big they are, what colour they are, and how faded. That is
+   the definition of an instanced draw.
+
+       before   226 potential draws, 226 materials
+       after      6 draws, 6 materials
+
+   HOW IT IS DONE WITHOUT REWRITING THE EFFECT CODE
+   Debris.decal(), .chunk(), .puff(), .gib() and the three sweep loops in
+   update() all talk to `entry.m` as if it were a Mesh — position, rotation,
+   quaternion, scale, visible, lookAt, rotateZ, material.color,
+   material.opacity, material.blending. Every one of those except the
+   material is already on THREE.Object3D, which is a Mesh with the drawing
+   taken out.
+
+   So each pooled Mesh is replaced by a bare Object3D carrying a plain
+   object where its material used to be, and nothing in the effect code
+   changes or even notices. Once a frame, just before the picture is drawn,
+   the proxies are read into three InstancedMeshes.
+
+   THE THREE BUCKETS
+   Blending is chosen per SPAWN, not per pool — a scorch mark is normal, the
+   cyan flash over it is additive — so one pool needs more than one instanced
+   draw. Three buckets, and a proxy lands in whichever matches what it is
+   asking for this frame:
+
+       opaque   full alpha, normal blending, writes depth
+       blend    faded, normal blending, sorted
+       add      additive, where alpha is a multiply on the colour and needs
+                no shader change at all
+
+   Colour and fade ride two instanced attributes and three lines of injected
+   GLSL, applied at `color_fragment` so a tint lands on the albedo rather than
+   on the lit result. three's own `instanceColor` looks like the right answer
+   and is unusable in r128 — the reason is spelled out at instanceHook below.
+
+   The buckets are also the frame budget. An instanced mesh has a fixed
+   capacity; past it, the oldest live effects simply are not drawn. A pool
+   that used to grow without limit during the exact moment the frame could
+   least afford it now has a ceiling.
+   ========================================================================= */
+const Swarm = {
+  list: [],
+  enabled: true,
+  stats: { draws: 0, instances: 0, dropped: 0 }
+};
+
+(function fxPass() {
+  const g = window.HEXIS;
+  if (!g) return;
+  const done = [];
+  const step = (n, fn) => { try { fn(); done.push(n); } catch (e) { console.error('[fx] ' + n, e); } };
+
+  const TMP_C = new THREE.Color();
+
+  /* --------------------------------------------------------- TINT + ALPHA
+     three's own `instanceColor` cannot be used here, and it is worth saying
+     why because it looks like it should be exactly the feature this needs.
+     In r128:
+
+         color_pars_vertex    varying vec3 vColor    under USE_COLOR || USE_INSTANCING_COLOR
+         color_vertex         vColor *= instanceColor  under USE_INSTANCING_COLOR
+         color_pars_fragment  varying vec3 vColor    under USE_COLOR ONLY
+         color_fragment       diffuseColor *= vColor under USE_COLOR ONLY
+
+     The vertex shader computes the per-instance colour and the fragment
+     shader never declares the varying to receive it. Turn on `vertexColors`
+     to define USE_COLOR and the fragment half wakes up — but then the vertex
+     half also does `vColor *= color`, and a geometry with no `color`
+     attribute gets WebGL's default of black.
+
+     So the tint rides its own attribute, alongside the alpha, and both are
+     applied at `color_fragment` — which is before lighting, so a chunk is
+     tinted in its albedo the way the un-instanced material tinted it, rather
+     than having a multiply smeared over the lit result and its specular. */
+  function instanceHook(mat) {
+    const prev = mat.onBeforeCompile;
+    mat.onBeforeCompile = function (shader, renderer) {
+      if (prev) prev.call(this, shader, renderer);
+      shader.vertexShader =
+        'attribute vec3 aTint;\nattribute float aAlpha;\n' +
+        'varying vec3 vTint;\nvarying float vAlpha;\n' +
+        shader.vertexShader.replace('#include <begin_vertex>',
+          '#include <begin_vertex>\n  vTint = aTint;\n  vAlpha = aAlpha;');
+      shader.fragmentShader =
+        'varying vec3 vTint;\nvarying float vAlpha;\n' +
+        shader.fragmentShader.replace('#include <color_fragment>',
+          '#include <color_fragment>\n  diffuseColor.rgb *= vTint;\n  diffuseColor.a *= vAlpha;');
+    };
+    // Without its own key this shares a compiled program with the un-injected
+    // material and renders with whatever happened to compile first.
+    mat.customProgramCacheKey = () => 'swarm-tint';
+    mat.needsUpdate = true;
+    return mat;
+  }
+
+  function bucket(scene, geo, template, cap, kind) {
+    const m = template.clone();
+    m.userData = template.userData;
+    m.vertexColors = false;
+    // `diffuseColor` starts as vec4(material.color, material.opacity) and the
+    // tint multiplies into it, so the material's own colour has to be white
+    // or every instance comes out as (template colour x its own colour) —
+    // which reads as the same rubble painted in the dark.
+    if (m.color) m.color.set(0xffffff);
+    m.opacity = 1;
+    if (kind === 'opaque') {
+      m.transparent = false; m.opacity = 1;
+      m.depthWrite = true; m.blending = THREE.NormalBlending;
+    } else if (kind === 'blend') {
+      m.transparent = true; m.opacity = 1;
+      m.depthWrite = false; m.blending = THREE.NormalBlending;
+    } else {
+      m.transparent = true; m.opacity = 1;
+      m.depthWrite = false; m.blending = THREE.AdditiveBlending;
+      // Additive is SRC_ALPHA/ONE, so alpha scales the contribution and the
+      // fade needs nothing special.
+    }
+    instanceHook(m);
+
+    const gg = geo.clone();
+    gg.setAttribute('aTint',
+      new THREE.InstancedBufferAttribute(new Float32Array(cap * 3).fill(1), 3));
+    gg.setAttribute('aAlpha',
+      new THREE.InstancedBufferAttribute(new Float32Array(cap).fill(1), 1));
+
+    const im = new THREE.InstancedMesh(gg, m, cap);
+    im.name = 'swarm:' + kind;
+    im.frustumCulled = false;            // instance bounds move every frame
+    im.castShadow = false;
+    im.receiveShadow = false;
+    im.count = 0;
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(im);
+    return im;
+  }
+
+  /* Replaces every Mesh in a pool with a proxy, and points the pool's factory
+     at proxies too so anything it makes later is one as well. */
+  function swarmify(name, pool, opts) {
+    const entries = pool.free.concat(pool.live);
+    if (!entries.length) return null;
+    const probe = entries[0].m;
+    if (!probe || !probe.isMesh) return null;
+
+    const geo = probe.geometry;
+    const template = probe.material;
+    const cap = opts.cap;
+    const scene = g.scene;
+
+    const sw = {
+      name, cap, pool,
+      opaque: (opts.opaque !== false && !template.transparent)
+        ? bucket(scene, geo, template, cap, 'opaque') : null,
+      blend: bucket(scene, geo, template, cap, 'blend'),
+      add: bucket(scene, geo, template, cap, 'add'),
+      proxies: [], dropped: 0
+    };
+    if (opts.renderOrder !== undefined) {
+      for (const b of [sw.opaque, sw.blend, sw.add]) if (b) b.renderOrder = opts.renderOrder;
+    }
+
+    const makeProxy = () => {
+      const o = new THREE.Object3D();
+      o.visible = false;
+      // A material-shaped object. Everything the effect code reads or writes
+      // is here; `needsUpdate` is a field rather than a version bump, which
+      // on its own removes 226 program re-evaluations from a busy frame.
+      o.material = {
+        color: new THREE.Color(0xffffff),
+        emissive: new THREE.Color(0x000000),
+        opacity: 1, transparent: !!template.transparent,
+        blending: template.blending, needsUpdate: false
+      };
+      o.__swarm = sw;
+      sw.proxies.push(o);
+      return o;
+    };
+
+    for (const e of entries) {
+      const old = e.m;
+      e.m = makeProxy();
+      e.m.position.copy(old.position);
+      if (old.parent) old.parent.remove(old);
+      if (old.material && old.material.dispose) old.material.dispose();
+    }
+
+    const baseFactory = pool.factory;
+    pool.factory = function (i) {
+      const o = baseFactory(i);
+      if (o && o.m && o.m.isMesh) {
+        const old = o.m;
+        o.m = makeProxy();
+        if (old.parent) old.parent.remove(old);
+        if (old.material && old.material.dispose) old.material.dispose();
+      }
+      return o;
+    };
+
+    Swarm.list.push(sw);
+    return sw;
+  }
+
+  /* -------------------------------------------------------------- THE SYNC
+     One pass over the live proxies, straight into the instance buffers. The
+     matrix compose is work the renderer would have done anyway, one object
+     at a time, with a draw call attached to each. */
+  function sync() {
+    let draws = 0, instances = 0, dropped = 0;
+    for (const sw of Swarm.list) {
+      let no = 0, nb = 0, na = 0;
+      for (const o of sw.proxies) {
+        if (!o.visible) continue;
+        const mat = o.material;
+        const a = mat.opacity === undefined ? 1 : mat.opacity;
+        if (a <= 0.003) continue;
+        const additive = mat.blending === THREE.AdditiveBlending;
+        let target, idx;
+        if (additive) { target = sw.add; idx = na; }
+        else if (sw.opaque && a >= 0.999) { target = sw.opaque; idx = no; }
+        else { target = sw.blend; idx = nb; }
+        if (idx >= sw.cap) { dropped++; continue; }
+
+        o.updateMatrix();
+        target.setMatrixAt(idx, o.matrix);
+        const at = target.geometry.attributes;
+        // Per-instance emissive is not a thing, so a glowing chunk gets its
+        // glow added into the tint. It is an approximation, and it is the
+        // difference between a hot fragment reading hot and reading like
+        // every other piece of gravel.
+        TMP_C.copy(mat.color);
+        const em = mat.emissive;
+        if (em && (em.r || em.g || em.b)) TMP_C.add(em);
+        at.aTint.array[idx * 3] = TMP_C.r;
+        at.aTint.array[idx * 3 + 1] = TMP_C.g;
+        at.aTint.array[idx * 3 + 2] = TMP_C.b;
+        at.aAlpha.array[idx] = a;
+        if (additive) na++; else if (target === sw.opaque) no++; else nb++;
+      }
+      const flush = (b, n) => {
+        if (!b) return;
+        if (b.count === 0 && n === 0) return;          // nothing to upload
+        b.count = n;
+        // An InstancedMesh with a count of zero still walks the renderer's
+        // per-object path before the buffer renderer declines to draw it.
+        b.visible = n > 0;
+        b.instanceMatrix.needsUpdate = true;
+        b.geometry.attributes.aTint.needsUpdate = true;
+        b.geometry.attributes.aAlpha.needsUpdate = true;
+        if (n) { draws++; instances += n; }
+      };
+      flush(sw.opaque, no); flush(sw.blend, nb); flush(sw.add, na);
+    }
+    Swarm.stats.draws = draws;
+    Swarm.stats.instances = instances;
+    Swarm.stats.dropped = dropped;
+  }
+  Swarm.sync = sync;
+
+  /* ------------------------------------------------------------------ WIRE
+     Debris builds its pools in init(), which runs on the expansion's install
+     step, so by the time this file executes they exist and are empty. */
+  step('debris', () => {
+    if (typeof Debris === 'undefined' || !Debris.ready) return;
+    const touch = typeof Input !== 'undefined' && Input.touch;
+    // Capacity per bucket. A phone gets fewer because the thing being
+    // budgeted is the phone's frame, and rubble is the cheapest thing in the
+    // picture to have less of.
+    swarmify('chunks', Debris.chunks, { cap: touch ? 40 : 96 });
+    swarmify('decals', Debris.decals, { cap: touch ? 32 : 80, renderOrder: 2, opaque: false });
+    swarmify('puffs', Debris.puffs, { cap: touch ? 28 : 72, opaque: false });
+  });
+
+  /* Sync immediately before the picture is drawn, not from a frame hook —
+     frame() renders at its end, so a hook after it would put every effect
+     one frame behind where the simulation says it is. */
+  step('hook', () => {
+    const post = g.post;
+    if (!post || !post.render) return;
+    const base = post.render.bind(post);
+    post.render = function (dt, p) {
+      if (Swarm.enabled) { try { sync(); } catch (e) { console.error('[fx] sync', e); } }
+      return base(dt, p);
+    };
+  });
+
+  /* A zone change retires everything; the buckets have to be told or they
+     keep drawing the last zone's rubble for a frame. */
+  step('reset', () => {
+    Bus.on('zone:loaded', () => {
+      for (const sw of Swarm.list) for (const b of [sw.opaque, sw.blend, sw.add]) if (b) b.count = 0;
+    });
+  });
+
+  step('report', () => {
+    const prev = g.frameReport;
+    g.frameReport = function () {
+      const r = prev ? prev.call(this) : {};
+      r.swarm = { draws: Swarm.stats.draws, instances: Swarm.stats.instances, dropped: Swarm.stats.dropped };
+      return r;
+    };
+    Swarm.setEnabled = function (on) {
+      this.enabled = !!on;
+      if (on) return;
+      for (const sw of this.list) for (const b of [sw.opaque, sw.blend, sw.add]) if (b) b.count = 0;
+    };
+  });
+
+  console.log('[hexis 4.1] fx online: ' + done.join(', ') +
+    '  ·  ' + Swarm.list.length + ' pools instanced');
+})();
+
+/* ===== 450-menu.js ========================================================
+   HEXIS 4.1 — the rotate prompt has never laid out.
+
+   2.4's touch pass downgraded #rotate from a full-screen block to a
+   dismissible bottom banner, and wrote the banner as a three-column grid:
+
+       #rotate{ grid-template-columns: auto 1fr auto }   — phone | text | button
+       #rotate .rtxt{ min-width:0 }
+
+   `.rtxt` does not exist. The markup at line 984 has FOUR children — the
+   phone graphic, an h3, a p and the button — so they fill the three columns
+   and wrap: phone, heading and button take row one, and the paragraph drops
+   into row two, column one, which is sized `auto` to fit a 30px phone icon.
+
+   That is why the copy reads one word per line down a nine-character gutter
+   with the button floating unattached beside it. It is the first thing
+   anyone playing on a phone in portrait sees, and it has looked like that
+   since the banner was written — the rule for the wrapper survived; the
+   wrapper itself never got added.
+
+   Two lines of DOM, done where every other pass in this file works, rather
+   than editing markup a dozen systems query by id.
+   ========================================================================= */
+(function menu41Pass() {
+  const g = window.HEXIS;
+  if (!g) return;
+  const done = [];
+  const step = (n, fn) => { try { fn(); done.push(n); } catch (e) { console.error('[menu4] ' + n, e); } };
+
+  step('rtxt', () => {
+    const rot = document.querySelector('#rotate');
+    if (!rot || rot.querySelector('.rtxt')) return;
+    const h3 = rot.querySelector('h3'), p = rot.querySelector('p');
+    if (!h3 || !p) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'rtxt';
+    rot.insertBefore(wrap, h3);
+    wrap.appendChild(h3);
+    wrap.appendChild(p);
+  });
+
+  step('style', () => {
+    const css = `
+/* The banner sat on top of the touch controls, so the one thing it asks you
+   to do — keep playing while you decide — was the thing it covered. Lift it
+   clear of them and of the home indicator, and give it an edge so it reads as
+   a panel rather than as a gradient the world faded into. */
+#rotate{
+  bottom:calc(env(safe-area-inset-bottom,0px) + 4px);
+  left:max(8px,env(safe-area-inset-left,0px));
+  right:max(8px,env(safe-area-inset-right,0px));
+  border:1px solid var(--edge);
+  clip-path:var(--clip);
+  padding:12px 14px;
+}
+
+/* Two columns and two rows, at every width, because there is no width where
+   three columns work here. The banner only ever shows in portrait — the
+   landscape rule below it is display:none — so the container is always the
+   short edge of a phone, and the dismiss button is 23 characters of
+   letter-spaced mono with white-space:nowrap. On a 414px screen that button
+   claims about half the row as its auto track, the text column is the 1fr
+   that absorbs the difference, and min-width:0 lets it shrink to nothing.
+   Hence one word per line: the missing .rtxt wrapper was only half of it. */
+#rotate{
+  grid-template-columns:auto minmax(0,1fr);
+  column-gap:14px; row-gap:10px;
+  align-items:center;
+}
+#rotate .rtxt{ min-width:0; text-align:left; grid-column:2; }
+#rotate .rtxt h3{ margin:0 0 3px; }
+/* max-width:32ch on a grid item that is already 1fr made the paragraph stop
+   short of its own column on anything wider than a small phone. */
+#rotate .rtxt p{ margin:0; max-width:none; }
+#rotate .phone{ grid-column:1; grid-row:1; align-self:center; }
+#rotate .btn{
+  grid-column:1 / -1; justify-self:stretch;
+  text-align:center; white-space:normal;
+}
+`;
+    const n = document.createElement('style');
+    n.id = 'menu41-css';
+    n.textContent = css;
+    document.head.appendChild(n);
+  });
+
+  console.log('[hexis 4.1] menu online: ' + done.join(', '));
+})();
+
+/* ===== 460-cast.js ========================================================
+   HEXIS 4.1 — the prologue cast never left.
+
+   Instrumented a busy Central City fight after the effect pass. The three
+   heaviest objects in the frame were not enemies, not the player, not
+   ragdolls, and not anything the fight had made:
+
+       Group   61 meshes   53 draws/frame   at (-7, 0,  5)
+       Group   61 meshes   50 draws/frame   at (-7, 0,  7)
+       Group   61 meshes   46 draws/frame   at (-4, 0,  7)
+
+   Those coordinates are in startIntro():
+
+       father.root.position.set (-7.1, 0.2, 7.6)
+       mother.root.position.set (-4.9, 0.2, 7.6)
+       friend1.root.position.set(-7.6, 0.2, 5.6)
+       friend2.root.position.set(-4.3, 0.2, 5.6)
+
+   The family from the house on Elder Street. Four full civilian rigs, still
+   standing at the coordinates of a living room three zones ago, buried inside
+   Central City's geometry where nobody can see them, submitted every frame
+   for the rest of the run. Around 150 draw calls — more than the entire rest
+   of the frame after 4.0 and 4.1 put together.
+
+   `enterShowdown()` does remove them, and while the prologue plays through
+   to its end they go when they should. But it is the ONLY place that does,
+   and it is one of several ways out of the house:
+
+       · the title screen's own SKIP TO THE FIGHT
+       · travel() from anywhere, which is what the Dev menu's zone buttons and
+         its "straight to the city" do
+       · quitting to the title and starting again, which leaves the previous
+         run's cast in the scene and then adds a second one
+       · skipping the cutscene at a shot that does not chain into it
+
+   4.0 shipped a menu whose first item skips every cutscene in the game, which
+   turned the least-travelled of those paths into the most. This is that bill.
+
+   Two rules, and they cover every route:
+
+     [1] Any zone load retires whatever cast is still standing. `introRigs` is
+         always assigned AFTER the loadZone that set its scene up, so this can
+         never catch a cast that is still needed — including the Vane portal
+         sequence, which uses the same field.
+
+     [2] Retiring means dispose(), not scene.remove(). The existing path only
+         detaches, so the four rigs' 244 geometries and their materials stayed
+         on the GPU for the rest of the session. Detached geometry costs no
+         draw calls and it is still memory a phone does not have.
+   ========================================================================= */
+(function castPass() {
+  const g = window.HEXIS;
+  if (!g) return;
+  const done = [];
+  const step = (n, fn) => { try { fn(); done.push(n); } catch (e) { console.error('[cast] ' + n, e); } };
+
+  let retired = 0;
+
+  function retireCast(game) {
+    const cast = game.introRigs;
+    if (!cast) return 0;
+    let n = 0;
+    for (const k in cast) {
+      const o = cast[k];
+      if (!o) continue;
+      const root = o.root || (o.isObject3D ? o : null);
+      if (!root) continue;
+      if (root.parent) root.parent.remove(root);
+      // The rig's own dispose() frees its shared material set; the traverse
+      // catches the plates that installRigDetail and the 3.x surface passes
+      // added on top and that dispose() does not know about.
+      if (typeof o.dispose === 'function') { try { o.dispose(); } catch (e) { } }
+      root.traverse((x) => {
+        if (x.geometry) x.geometry.dispose();
+        const m = x.material;
+        if (!m) return;
+        if (Array.isArray(m)) m.forEach(y => y.dispose && y.dispose());
+        else if (m.dispose) m.dispose();
+      });
+      n++;
+    }
+    game.introRigs = null;
+    game.__castZone = null;
+    // Anything the prologue still had armed belongs to the cast.
+    game.qte = null;
+    retired += n;
+    return n;
+  }
+  g.retireCast = () => retireCast(g);
+
+  /* [1] A zone load that leaves the cast's own zone.
+
+         "Any zone load" was the first cut of this and it was wrong: the
+         prologue's own sequences run across several loads, and retiring the
+         cast underneath them left `startRushStrike` reading `.kell` off null.
+         `introRigs` is always assigned AFTER the loadZone that stages it, so
+         the owning zone can be learned on the first frame the field is set
+         and compared on every load after. */
+  step('on-load', () => {
+    Hook.after(Game.prototype, 'frame', function () {
+      if (this.introRigs) { if (!this.__castZone) this.__castZone = this.zone && this.zone.name; }
+      else this.__castZone = null;
+    }, 'cast41:stamp');
+
+    Hook.after(Game.prototype, 'loadZone', function () {
+      if (!this.introRigs) return;
+      const owner = this.__castZone;
+      if (owner && this.zone && owner === this.zone.name) return;   // same room
+      const n = retireCast(this);
+      this.__castZone = null;
+      if (n) console.log('[hexis 4.1] retired ' + n + ' prologue rigs leaving ' + owner);
+    }, 'cast41:load');
+  });
+
+  /* Leaving the house does not stop the house's story beats. `travel()`
+     aborts the cutscene and cancels its own timer, but a prologue QTE stays
+     armed and its callbacks reach for a cast that is three zones away — which
+     used to find stale rigs standing in a wall and now finds nothing at all.
+     Neither is a scene anyone wants; cancel the beat with the cast. */
+  step('stand-down', () => {
+    const guard = (name) => {
+      if (typeof Game.prototype[name] !== 'function') return;
+      Hook.before(Game.prototype, name, function () {
+        if (!this.introRigs || !this.introRigs.kell) return false;   // cancels
+      }, 'cast41:' + name);
+    };
+    guard('startRushStrike');
+    guard('startFistQTEPrologue');
+    guard('landPrologueFist');
+  });
+
+  /* [2] The one path that already handled this gets the disposal it was
+         missing. Running first means the base method's scene.remove calls
+         find nothing left to do, which is exactly what should happen. */
+  step('on-showdown', () => {
+    if (typeof Game.prototype.enterShowdown !== 'function') return;
+    Hook.before(Game.prototype, 'enterShowdown', function () { retireCast(this); }, 'cast41:showdown');
+  });
+
+  /* A restart from the title is the case that used to ADD a cast rather than
+     replace one: startIntro builds four new rigs and overwrites the field
+     that held the old four, which are then unreachable and undisposable. */
+  step('on-intro', () => {
+    Hook.before(Game.prototype, 'startIntro', function () { retireCast(this); }, 'cast41:intro');
+  });
+
+  step('report', () => {
+    const prev = g.frameReport;
+    g.frameReport = function () {
+      const r = prev ? prev.call(this) : {};
+      r.castRetired = retired;
+      return r;
+    };
+  });
+
+  console.log('[hexis 4.1] cast online: ' + done.join(', '));
 })();
 
 /* <<< end HEXIS 3.0 modules <<< */
